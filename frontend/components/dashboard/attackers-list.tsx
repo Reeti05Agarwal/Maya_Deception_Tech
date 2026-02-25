@@ -91,8 +91,8 @@ export function AttackersList({ attackers, loading }: AttackersListProps) {
     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
       {(Array.isArray(attackers) ? attackers : []).map((a, index) => (
   <Link
-    key={a.id || a.attackerId || `attacker-${index}`}
-    href={`/attacker/${encodeURIComponent(a.id || a.attackerId || 'unknown')}`}  
+    key={a.id || `attacker-${index}`}
+    href={`/attacker/${encodeURIComponent(a.id || 'unknown')}`}
           className={cn("block focus:outline-none focus:ring-2 focus:ring-ring focus:ring-offset-2 focus:ring-offset-background rounded-lg")}
         >
           <Card className="h-full border-border bg-card transition-colors hover:bg-card/80">

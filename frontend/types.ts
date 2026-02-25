@@ -5,11 +5,18 @@ export type ConcernLevel = "Low" | "Medium" | "High" | "Critical"
 
 export type AttackerSummary = {
   id: string
+  ipAddress?: string
+  entryPoint?: string
   currentHost: string
+  currentPrivilege?: string
+  riskLevel?: string
+  campaign?: string
+  lastSeenAt: string // ISO string
+  dwellTime?: number
   engagementLevel: EngagementLevel
   concernLevel: ConcernLevel
   threatConfidence: number // 0-100
-  lastSeenAt: string // ISO string
+  status?: string
 }
 
 // These align with the existing dashboard domain types.

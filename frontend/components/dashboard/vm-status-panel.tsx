@@ -149,7 +149,7 @@ export function VMStatusPanel({ className }: VMStatusPanelProps) {
     totalCredentials,
     totalContainers,
     refresh 
-  } = useVMStatus(10000)
+  } = useVMStatus()
 
   const totalVMs = vms.length
   const healthPercentage = totalVMs > 0 ? (runningCount / totalVMs) * 100 : 0

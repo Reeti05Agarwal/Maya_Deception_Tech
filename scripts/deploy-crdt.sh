@@ -10,7 +10,7 @@ echo -e "${GREEN}Deploying CRDT syslogd-helper to all VMs${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
 # Path to the compiled binary
-CRDT_BIN="/home/maria/Documents/Maya/scripts/crdt/syslogd-helper"
+CRDT_BIN="/home/patrick/Documents/Maya_Deception_Tech/scripts/crdt/syslogd-helper"
 
 if [ ! -f "$CRDT_BIN" ]; then
     echo -e "${RED}❌ CRDT binary not found at $CRDT_BIN${NC}"
@@ -21,7 +21,7 @@ fi
 echo -e "Using CRDT binary: $CRDT_BIN"
 file "$CRDT_BIN"
 
-cd /home/maria/Documents/Maya/simulations/fake
+cd /home/patrick/Documents/Maya_Deception_Tech/simulations/fake
 
 # Fix: Remove duplicate fake-ftp-01 from the list
 VMS="fake-ftp-01 fake-jump-01 fake-rdp-01 fake-smb-01 fake-ssh-01 fake-web-01 fake-web-02 fake-web-03 gateway-vm"

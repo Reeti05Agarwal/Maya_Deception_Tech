@@ -41,7 +41,7 @@ echo "  $VM2: Attackers=$V2_COUNT, Hash=${V2_HASH:0:20}..."
 # Step 2: Create attacker on VM1
 echo -e "\n${YELLOW}Step 2: Creating attacker on $VM1${NC}"
 cd "$VM1"
-vagrant ssh -c "sudo /usr/local/bin/syslogd-helper visit 192.179.20.75 /fake-web-02"
+vagrant ssh -c "sudo /usr/local/bin/syslogd-helper visit 192.179.20.85 /fake-web-02"
 vagrant ssh -c "sudo /usr/local/bin/syslogd-helper stats"
 cd ..
 
@@ -73,7 +73,7 @@ fi
 # Step 5: Create attacker on VM2
 echo -e "\n${YELLOW}Step 5: Creating attacker on $VM2${NC}"
 cd "$VM2"
-vagrant ssh -c "sudo /usr/local/bin/syslogd-helper visit 192.178.10.75 /fake-ftp-01"
+vagrant ssh -c "sudo /usr/local/bin/syslogd-helper visit 192.178.10.85 /fake-ftp-01"
 vagrant ssh -c "sudo /usr/local/bin/syslogd-helper stats"
 cd ..
 

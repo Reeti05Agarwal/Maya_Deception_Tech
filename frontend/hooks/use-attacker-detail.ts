@@ -56,7 +56,7 @@ export function useAttackerDetail(
       }
 
       setData(json.data)
-      console.log(`Fetched attacker details for ${id}:`, json.data.attacker)
+      console.log(`Fetched attacker details for ${id}:`, json.data)
       setError(null)
     } catch (e) {
       if ((e as Error).name === "AbortError") return

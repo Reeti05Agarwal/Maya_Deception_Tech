@@ -2,15 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 
 export async function GET(
   request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> }
+  { params }: { params: Promise<Record<string, string | string[]>> }
 ) {
-  const { path } = await params;
+  const resolvedParams = await params;
+  const path = Array.isArray(resolvedParams.path) ? resolvedParams.path : [resolvedParams.path as string];
   const pathString = path.join('/');
   const searchParams = request.nextUrl.searchParams.toString();
   const query = searchParams ? `?${searchParams}` : '';
-  
+
   const backendUrl = `http://localhost:3001/api/${pathString}${query}`;
-  
+
   try {
     const response = await fetch(backendUrl, {
       headers: {
@@ -18,7 +19,7 @@ export async function GET(
       },
       cache: 'no-store',
     });
-    
+
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
@@ -31,14 +32,15 @@ export async function GET(
 
 export async function POST(
   request: NextRequest,
-  { params }: { params: Promise<{ path: string[] }> }
+  { params }: { params: Promise<Record<string, string | string[]>> }
 ) {
-  const { path } = await params;
+  const resolvedParams = await params;
+  const path = Array.isArray(resolvedParams.path) ? resolvedParams.path : [resolvedParams.path as string];
   const pathString = path.join('/');
   const body = await request.json();
-  
+
   const backendUrl = `http://localhost:3001/api/${pathString}`;
-  
+
   try {
     const response = await fetch(backendUrl, {
       method: 'POST',
@@ -48,7 +50,7 @@ export async function POST(
       body: JSON.stringify(body),
       cache: 'no-store',
     });
-    
+
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {

@@ -9,8 +9,8 @@ import { useRealtimeAttackers } from "@/hooks/use-realtime-attackers"
 import { useVMStatus } from "@/hooks/use-vm-status"
 
 export function AttackersOverview() {
-  const { attackers, loading, lastUpdate, wsConnected, refresh } = useRealtimeAttackers(5000)
-  const { runningCount, totalVMs, wsConnected: vmWsConnected } = useVMStatus(10000)
+  const { attackers, loading, lastUpdate, wsConnected, refresh } = useRealtimeAttackers()
+  const { runningCount, totalVMs, wsConnected: vmWsConnected } = useVMStatus()
 
   return (
     <div className="min-h-screen bg-background">

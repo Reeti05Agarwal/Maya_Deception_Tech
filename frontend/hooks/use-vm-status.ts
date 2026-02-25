@@ -35,6 +35,7 @@ type UseVMStatusResult = {
   refresh: () => void
   runningCount: number
   stoppedCount: number
+  totalVMs: number
   totalAttackers: number
   totalCredentials: number
   totalSessions: number
@@ -130,6 +131,7 @@ export function useVMStatus(): UseVMStatusResult {
   const stats = useMemo(() => {
     const running = vms.filter(v => v.status === 'running').length
     const stopped = vms.filter(v => v.status === 'stopped').length
+    const totalVMs = vms.length
     const totalAttackers = vms.reduce((sum, v) => sum + (v.crdtState?.attackers || 0), 0)
     const totalCredentials = vms.reduce((sum, v) => sum + (v.crdtState?.credentials || 0), 0)
     const totalSessions = vms.reduce((sum, v) => sum + (v.crdtState?.sessions || 0), 0)
@@ -138,6 +140,7 @@ export function useVMStatus(): UseVMStatusResult {
     return {
       runningCount: running,
       stoppedCount: stopped,
+      totalVMs,
       totalAttackers,
       totalCredentials,
       totalSessions,

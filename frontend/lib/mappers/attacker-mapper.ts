@@ -1,11 +1,10 @@
 import type { AttackerSummary, AttackerDetails } from "@/types"
-import type { DashboardData, Overview, Attacker, TimelineEvent, MitreMatrixData, LateralMovementData, CommandActivityItem, BehaviorAnalysisData, IncidentSummaryData, ActivityBar, CredentialUsageData, DeceptionMetricsData } from "@/lib/dashboard/types"
+import type { DashboardData, Overview, Attacker, TimelineEvent, MitreMatrixData, LateralMovementData, CommandActivityItem, BehaviorAnalysisData, IncidentSummaryData, ActivityBar, CredentialUsageItem, DeceptionMetricItem } from "@/lib/dashboard/types"
 
 // Map backend MongoDB attacker to frontend AttackerSummary
 export function mapToAttackerSummary(dbAttacker: any): AttackerSummary {
   return {
     id: dbAttacker.attackerId,
-    attackerId: dbAttacker.attackerId,
     ipAddress: dbAttacker.ipAddress,
     entryPoint: dbAttacker.entryPoint,
     currentHost: dbAttacker.entryPoint, // Use entryPoint as currentHost
@@ -28,7 +27,18 @@ export function mapToAttackerSummary(dbAttacker: any): AttackerSummary {
 export function mapToAttackerDetails(dbAttacker: any, dashboard: DashboardData | null = null): AttackerDetails {
   return {
     id: dbAttacker.attackerId,
-    attackerId: dbAttacker.attackerId,
+    ipAddress: dbAttacker.ipAddress,
+    entryPoint: dbAttacker.entryPoint,
+    currentHost: dbAttacker.entryPoint,
+    currentPrivilege: dbAttacker.currentPrivilege,
+    riskLevel: dbAttacker.riskLevel,
+    campaign: dbAttacker.campaign,
+    lastSeenAt: dbAttacker.lastSeen,
+    dwellTime: dbAttacker.dwellTime,
+    engagementLevel: calculateEngagementLevel(dbAttacker.dwellTime),
+    concernLevel: dbAttacker.riskLevel,
+    threatConfidence: calculateThreatConfidence(dbAttacker),
+    status: dbAttacker.status,
     generatedAt: new Date().toISOString(),
     dashboard: dashboard || createMockDashboard(dbAttacker),
   }
@@ -185,9 +195,9 @@ function createBehaviorAnalysis(attacker: any): BehaviorAnalysisData {
 function createIncidentSummary(attacker: any): IncidentSummaryData {
   return {
     slices: [
-      { value: 40, label: "Reconnaissance" },
-      { value: 35, label: "Exploitation" },
-      { value: 25, label: "Exfiltration" },
+      { value: 40, name: "Reconnaissance" },
+      { value: 35, name: "Exploitation" },
+      { value: 25, name: "Exfiltration" },
     ],
     legend: [
       { label: "Reconnaissance", kind: "secondary" as const, pct: "40%" },
@@ -208,7 +218,7 @@ function createActivityChart(attacker: any): ActivityBar[] {
   ]
 }
 
-function createCredentialUsage(attacker: any): CredentialUsageData {
+function createCredentialUsage(attacker: any): { credentials: CredentialUsageItem[]; warnings: { label: string; kind: 'destructive' | 'accent' }[] } {
   return {
     credentials: [
       { name: "admin_user", alerts: 3, sessions: 5 },
@@ -222,7 +232,7 @@ function createCredentialUsage(attacker: any): CredentialUsageData {
   }
 }
 
-function createDeceptionMetrics(attacker: any): DeceptionMetricsData {
+function createDeceptionMetrics(attacker: any): { items: DeceptionMetricItem[] } {
   return {
     items: [
       { label: "Decoys Deployed", value: "12", kind: "chart3" as const },

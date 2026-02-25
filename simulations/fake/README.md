@@ -82,3 +82,29 @@ Vagrant.configure("2") do |config|
   config.vm.provision "shell",
     path: "../scripts/identity_bootstrap.sh"
 end
+
+
+# destroy all VMS:
+cd ~/Documents/Maya_Deception_Tech/simulations/fake
+
+# Force destroy all domains with virsh
+for vm in gateway-vm fake-ftp-01 fake-jump-01 fake-rdp-01 fake-smb-01 fake-ssh-01 fake-web-01 fake-web-02 fake-web-03; do
+    echo "Force destroying $vm..."
+    sudo virsh destroy "${vm}_default" 2>/dev/null || true
+    sudo virsh undefine "${vm}_default" --remove-all-storage 2>/dev/null || true
+    sudo virsh destroy "$vm" 2>/dev/null || true  
+    sudo virsh undefine "$vm" --remove-all-storage 2>/dev/null || true
+done
+
+# Also clean up any leftover volumes
+sudo virsh vol-list default | grep -E "(gateway|fake-)" | awk '{print $1}' | while read vol; do
+    echo "Deleting volume: $vol"
+    sudo virsh vol-delete "$vol" default 2>/dev/null || true
+done
+
+# Verify cleanup
+sudo virsh list --all
+
+
+cd ~/Documents/Maya_Deception_Tech/simulations/fake/gateway-vm
+vagrant destroy -f

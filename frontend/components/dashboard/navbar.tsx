@@ -7,6 +7,7 @@ import { Server, Activity } from "lucide-react"
 import { useVMStatus } from "@/hooks/use-vm-status"
 import { toast } from "@/hooks/use-toast"
 import { Button } from "@/components/ui/button"
+import { SystemHealthIndicator } from "@/components/dashboard/system-health-indicator"
 import {
   Dialog,
   DialogContent,
@@ -59,10 +60,10 @@ export function Navbar({ title = "MAYA", onExport, onRefresh, exportDisabled }: 
           <div className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-emerald-500' : 'bg-amber-500'}`} title={wsConnected ? 'Live' : 'Polling'} />
         </div>
       </div>
-      <div className="flex items-center gap-2">
-        <Shield className="h-7 w-7 text-primary" />
-        <span className="text-xl font-bold tracking-wide text-foreground">{title}</span>
-      </div>
+      
+      {/* System Health Indicator */}
+      <SystemHealthIndicator />
+      
       <div className="flex items-center gap-4">
         <Button
           variant="ghost"

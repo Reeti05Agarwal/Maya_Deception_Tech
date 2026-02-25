@@ -12,8 +12,10 @@ import { errorHandler } from './middleware/errorHandler';
 import { logger } from './utils/logger';
 import { CRDTSyncService } from './services/CRDTSyncService';
 import { WebSocketHandler } from './websocket/WebSocketHandler';
+import { SimulationService } from './services/SimulationService';
 import dashboardRoutes from './routes/dashboard';
-import VMStatus from './models/VMStatus';  // FIXED: Import default export
+import simulationRoutes from './routes/simulation';
+import VMStatus from './models/VMStatus';
 
 dotenv.config();
 
@@ -60,10 +62,12 @@ mongoose.connect(MONGODB_URI)
 
 // Initialize services
 const crdtSync = new CRDTSyncService();
-const wsHandler = new WebSocketHandler(server, crdtSync);
+const simulationService = new SimulationService();
+const wsHandler = new WebSocketHandler(server, crdtSync, simulationService);
 
 // API Routes
 app.use('/api/dashboard', dashboardRoutes);
+app.use('/api/simulation', simulationRoutes);
 
 // Health check
 app.get('/health', (req, res) => {

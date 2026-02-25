@@ -5,10 +5,11 @@ const ws_1 = require("ws");
 const DashboardService_1 = require("../services/DashboardService");
 const logger_1 = require("../utils/logger");
 class WebSocketHandler {
-    constructor(server, crdtSync) {
+    constructor(server, crdtSync, simulationService) {
         this.clients = new Set();
         this.wss = new ws_1.WebSocketServer({ server, path: '/ws' });
         this.crdtSync = crdtSync;
+        this.simulationService = simulationService;
         this.dashboardService = new DashboardService_1.DashboardService();
         this.setupWebSocket();
         this.setupEventListeners();
@@ -77,6 +78,7 @@ class WebSocketHandler {
         });
     }
     setupEventListeners() {
+        // CRDT Sync events
         this.crdtSync.on('newEvent', async (event) => {
             logger_1.logger.info(`WebSocket broadcasting NEW_EVENT: ${event.eventId}`);
             this.broadcast({ type: 'NEW_EVENT', data: event, timestamp: new Date().toISOString() });
@@ -108,6 +110,23 @@ class WebSocketHandler {
             catch (error) {
                 logger_1.logger.error('Error broadcasting sync complete:', error);
             }
+        });
+        // Simulation events
+        this.simulationService.on('newEvent', async (event) => {
+            logger_1.logger.info(`WebSocket broadcasting simulation NEW_EVENT: ${event.eventId}`);
+            this.broadcast({ type: 'NEW_EVENT', data: event, timestamp: new Date().toISOString() });
+        });
+        this.simulationService.on('simulationComplete', (data) => {
+            logger_1.logger.info(`WebSocket broadcasting SIMULATION_COMPLETE: ${data.type}`);
+            this.broadcast({
+                type: 'SIMULATION_COMPLETE',
+                data,
+                timestamp: new Date().toISOString()
+            });
+        });
+        this.simulationService.on('triggerSync', async () => {
+            logger_1.logger.info('Simulation service triggered CRDT sync');
+            await this.crdtSync.performSync();
         });
     }
     async handleMessage(ws, data) {

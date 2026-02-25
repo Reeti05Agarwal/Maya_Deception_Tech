@@ -1,18 +1,21 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { Server } from 'http';
 import { CRDTSyncService } from '../services/CRDTSyncService';
+import { SimulationService } from '../services/SimulationService';
 import { DashboardService } from '../services/DashboardService';
 import { logger } from '../utils/logger';
 
 export class WebSocketHandler {
   private wss: WebSocketServer;
   private crdtSync: CRDTSyncService;
+  private simulationService: SimulationService;
   private dashboardService: DashboardService;
   private clients: Set<WebSocket> = new Set();
 
-  constructor(server: Server, crdtSync: CRDTSyncService) {
+  constructor(server: Server, crdtSync: CRDTSyncService, simulationService: SimulationService) {
     this.wss = new WebSocketServer({ server, path: '/ws' });
     this.crdtSync = crdtSync;
+    this.simulationService = simulationService;
     this.dashboardService = new DashboardService();
     this.setupWebSocket();
     this.setupEventListeners();
@@ -87,6 +90,7 @@ export class WebSocketHandler {
   }
 
   private setupEventListeners() {
+    // CRDT Sync events
     this.crdtSync.on('newEvent', async (event) => {
       logger.info(`WebSocket broadcasting NEW_EVENT: ${event.eventId}`);
       this.broadcast({ type: 'NEW_EVENT', data: event, timestamp: new Date().toISOString() });
@@ -95,7 +99,7 @@ export class WebSocketHandler {
     this.crdtSync.on('attackerUpdated', async (attacker) => {
       logger.info(`WebSocket broadcasting ATTACKER_UPDATED: ${attacker.attackerId}`);
       this.broadcast({ type: 'ATTACKER_UPDATED', data: attacker, timestamp: new Date().toISOString() });
-      
+
       // Also broadcast updated stats
       const stats = await this.dashboardService.getDashboardStats();
       this.broadcast({ type: 'STATS_UPDATED', data: stats, timestamp: new Date().toISOString() });
@@ -108,18 +112,38 @@ export class WebSocketHandler {
           this.dashboardService.getDashboardStats(),
           this.getActiveAttackers()
         ]);
-        this.broadcast({ 
-          type: 'SYNC_COMPLETE', 
-          data: { 
-            stats, 
+        this.broadcast({
+          type: 'SYNC_COMPLETE',
+          data: {
+            stats,
             activeAttackers,
-            syncData 
-          }, 
-          timestamp: new Date().toISOString() 
+            syncData
+          },
+          timestamp: new Date().toISOString()
         });
       } catch (error) {
         logger.error('Error broadcasting sync complete:', error);
       }
+    });
+
+    // Simulation events
+    this.simulationService.on('newEvent', async (event) => {
+      logger.info(`WebSocket broadcasting simulation NEW_EVENT: ${event.eventId}`);
+      this.broadcast({ type: 'NEW_EVENT', data: event, timestamp: new Date().toISOString() });
+    });
+
+    this.simulationService.on('simulationComplete', (data) => {
+      logger.info(`WebSocket broadcasting SIMULATION_COMPLETE: ${data.type}`);
+      this.broadcast({ 
+        type: 'SIMULATION_COMPLETE', 
+        data, 
+        timestamp: new Date().toISOString() 
+      });
+    });
+
+    this.simulationService.on('triggerSync', async () => {
+      logger.info('Simulation service triggered CRDT sync');
+      await this.crdtSync.performSync();
     });
   }
 

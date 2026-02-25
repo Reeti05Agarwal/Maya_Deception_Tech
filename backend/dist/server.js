@@ -16,8 +16,10 @@ const errorHandler_1 = require("./middleware/errorHandler");
 const logger_1 = require("./utils/logger");
 const CRDTSyncService_1 = require("./services/CRDTSyncService");
 const WebSocketHandler_1 = require("./websocket/WebSocketHandler");
+const SimulationService_1 = require("./services/SimulationService");
 const dashboard_1 = __importDefault(require("./routes/dashboard"));
-const VMStatus_1 = __importDefault(require("./models/VMStatus")); // FIXED: Import default export
+const simulation_1 = __importDefault(require("./routes/simulation"));
+const VMStatus_1 = __importDefault(require("./models/VMStatus"));
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const server = (0, http_1.createServer)(app);
@@ -55,9 +57,11 @@ mongoose_1.default.connect(MONGODB_URI)
 });
 // Initialize services
 const crdtSync = new CRDTSyncService_1.CRDTSyncService();
-const wsHandler = new WebSocketHandler_1.WebSocketHandler(server, crdtSync);
+const simulationService = new SimulationService_1.SimulationService();
+const wsHandler = new WebSocketHandler_1.WebSocketHandler(server, crdtSync, simulationService);
 // API Routes
 app.use('/api/dashboard', dashboard_1.default);
+app.use('/api/simulation', simulation_1.default);
 // Health check
 app.get('/health', (req, res) => {
     res.json({
