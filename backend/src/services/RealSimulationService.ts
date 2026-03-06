@@ -32,7 +32,7 @@ export class RealSimulationService extends EventEmitter {
     const vmDirs = entries
       .filter(entry => entry.isDirectory())
       .map(entry => entry.name)
-      .filter(name => name.startsWith('fake-'));
+      .filter(name => fs.existsSync(path.join(this.vagrantDir, name, 'Vagrantfile')));
 
     for (const vmName of vmDirs) {
       const vmPath = path.join(this.vagrantDir, vmName);
@@ -142,6 +142,7 @@ export class RealSimulationService extends EventEmitter {
           eventId: `evt-${uuidv4()}`,
           timestamp: new Date(),
           attackerId,
+          stage: 'INITIAL_ACCESS',
           type: 'Initial Access',
           technique: 'T1078',
           tactic: 'Initial Access',
@@ -184,6 +185,7 @@ export class RealSimulationService extends EventEmitter {
         eventId: `evt-${uuidv4()}`,
         timestamp: new Date(),
         attackerId,
+        stage: 'INITIAL_ACCESS',
         type: 'Initial Access',
         technique: 'T1078',
         tactic: 'Initial Access',
@@ -272,6 +274,7 @@ export class RealSimulationService extends EventEmitter {
       const initialEvent = new AttackEvent({
         eventId: `evt-${uuidv4()}`,
         attackerId,
+        stage: 'INITIAL_ACCESS',
         type: 'Initial Access',
         technique: 'T1078',
         tactic: 'Initial Access',
@@ -311,6 +314,7 @@ export class RealSimulationService extends EventEmitter {
         const moveEvent = new AttackEvent({
           eventId: `evt-${uuidv4()}`,
           attackerId,
+          stage: 'LATERAL_MOVEMENT',
           type: 'Lateral Movement',
           technique: 'T1021',
           tactic: 'Lateral Movement',
@@ -404,6 +408,7 @@ export class RealSimulationService extends EventEmitter {
       const dumpEvent = new AttackEvent({
         eventId: `evt-${uuidv4()}`,
         attackerId,
+        stage: 'CREDENTIAL_ACCESS',
         type: 'Credential Theft',
         technique: 'T1003',
         tactic: 'Credential Access',
@@ -445,6 +450,7 @@ export class RealSimulationService extends EventEmitter {
         const credEvent = new AttackEvent({
           eventId: `evt-${uuidv4()}`,
           attackerId,
+          stage: 'CREDENTIAL_ACCESS',
           type: 'Credential Theft',
           technique: 'T1003',
           tactic: 'Credential Access',

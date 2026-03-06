@@ -13,9 +13,10 @@ import { logger } from './utils/logger';
 import { CRDTSyncService } from './services/CRDTSyncService';
 import { WebSocketHandler } from './websocket/WebSocketHandler';
 import { SimulationService } from './services/SimulationService';
+import { InfrastructureDiscoveryService } from './services/InfrastructureDiscoveryService';
 import dashboardRoutes from './routes/dashboard';
 import simulationRoutes from './routes/simulation';
-import VMStatus from './models/VMStatus';
+import decoyRoutes from './routes/decoy';
 
 dotenv.config();
 
@@ -63,11 +64,13 @@ mongoose.connect(MONGODB_URI)
 // Initialize services
 const crdtSync = new CRDTSyncService();
 const simulationService = new SimulationService();
+const infrastructureDiscovery = new InfrastructureDiscoveryService();
 const wsHandler = new WebSocketHandler(server, crdtSync, simulationService);
 
 // API Routes
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/simulation', simulationRoutes);
+app.use('/api/decoy', decoyRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -87,48 +90,29 @@ app.get('/', (req, res) => {
     version: '1.0.0',
     endpoints: {
       dashboard: '/api/dashboard',
+      decoy: '/api/decoy',
       health: '/health',
       websocket: 'ws://localhost:' + PORT + '/ws'
     }
   });
 });
 
-// FIXED: VM Status endpoint with proper error handling and logging
 app.get('/api/vms', async (req, res) => {
   try {
-    logger.info('Fetching VM status from database...');
-    
-    const vms = await VMStatus.find().sort({ vmName: 1 }).lean();
-    
-    logger.info(`Found ${vms.length} VMs in database`);
-
-    if (!vms || vms.length === 0) {
-      logger.warn('No VMs found in database');
-    }
-
-    // Transform to expected format - match frontend expectations exactly
-    const formattedVMs = vms.map(vm => ({
-      name: vm.vmName,
-      status: vm.status,
-      ip: vm.ip,
-      lastSeen: vm.lastSeen,
-      crdtState: vm.crdtState,
-      dockerContainers: vm.dockerContainers || []
-    }));
+    const discovered = await infrastructureDiscovery.discoverVMs();
 
     res.json({
-      vms: formattedVMs,
+      vms: discovered,
       updatedAt: new Date().toISOString(),
       cached: false
     });
-
   } catch (error) {
-    logger.error('Failed to fetch VM status from DB:', error);
+    logger.error('Failed to discover VM status:', error);
     res.status(500).json({
       vms: [],
       updatedAt: new Date().toISOString(),
       cached: false,
-      error: 'Database error',
+      error: 'Infrastructure discovery error',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   }

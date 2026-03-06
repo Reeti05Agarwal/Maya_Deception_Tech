@@ -93,7 +93,11 @@ export function useVMStatus(): UseVMStatusResult {
         const parsedVMs = (json.vms || []).map((vm: any) => ({
           ...vm,
           lastSeen: new Date(vm.lastSeen || Date.now()),
-        }))
+        })).sort((a: VMStatus, b: VMStatus) => {
+          if (a.status === 'running' && b.status !== 'running') return -1
+          if (a.status !== 'running' && b.status === 'running') return 1
+          return a.name.localeCompare(b.name)
+        })
 
         setVMs(parsedVMs)
         setLastUpdate(new Date())
@@ -127,6 +131,21 @@ export function useVMStatus(): UseVMStatusResult {
 
     return unsubscribe
   }, [subscribe, fetchVMs])
+
+  // Local dashboard event to force refresh after decoy apply completes
+  useEffect(() => {
+    if (typeof window === "undefined") return
+
+    const handleVmRefresh = () => {
+      console.log("VM status hook: maya:vm-refresh received, forcing refresh")
+      void fetchVMs(true)
+    }
+
+    window.addEventListener("maya:vm-refresh", handleVmRefresh)
+    return () => {
+      window.removeEventListener("maya:vm-refresh", handleVmRefresh)
+    }
+  }, [fetchVMs])
 
   const stats = useMemo(() => {
     const running = vms.filter(v => v.status === 'running').length

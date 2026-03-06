@@ -1,4 +1,4 @@
-import { Attacker, AttackEvent, Credential, DecoyHost, LateralMovement } from '../models';
+import { Attacker, AttackEvent, Credential, DecoyHost, LateralMovement, VMStatus } from '../models';
 import moment from 'moment';
 import { mapToAttackerSummary, mapToDashboardData } from './AttackerMapper';
 
@@ -21,7 +21,10 @@ export class DashboardService {
       AttackEvent.countDocuments({ status: { $in: ['Blocked', 'Contained'] } })
     ]);
 
-    const totalHosts = await DecoyHost.countDocuments();
+    const [totalHosts, securityPosture] = await Promise.all([
+      DecoyHost.countDocuments(),
+      this.getSecurityPostureScore()
+    ]);
     const engagementRate = totalHosts > 0 ? (compromisedHosts / totalHosts) * 100 : 0;
     const totalDwellTime = await this.calculateTotalDwellTime();
 
@@ -43,7 +46,8 @@ export class DashboardService {
         compromisedHosts,
         blockedAttacks,
         falsePositives: 0
-      }
+      },
+      securityPosture
     };
   }
   async getMappedActiveAttackers() {
@@ -111,19 +115,29 @@ export class DashboardService {
     };
   }
 
-  async getAttackTimeline(attackerId?: string, hours = 24) {
-    const query: any = { timestamp: { $gte: moment().subtract(hours, 'hours').toDate() } };
+  async getAttackTimeline(attackerId?: string, hours = 24, limit = 100) {
+    const safeHours = Number.isFinite(hours) && hours > 0 ? hours : 24;
+    const query: any = { timestamp: { $gte: moment().subtract(safeHours, 'hours').toDate() } };
     if (attackerId) query.attackerId = attackerId;
+    const safeLimit = Number.isFinite(limit) ? Math.max(1, Math.min(limit, 500)) : 100;
 
-    const events = await AttackEvent.find(query).sort({ timestamp: 1 }).lean();
+    const events = await AttackEvent.find(query).sort({ timestamp: 1 }).limit(safeLimit).lean();
 
     return events.map(e => ({
-      time: moment(e.timestamp).format('HH:mm'),
+      eventId: e.eventId,
+      timestamp: e.timestamp,
+      time: moment(e.timestamp).format('HH:mm:ss'),
+      stage: e.stage || this.mapStageFromType(e.type, e.description),
       type: e.type,
       technique: e.technique,
       description: e.description,
       severity: e.severity,
-      status: e.status
+      status: e.status,
+      sourceHost: e.sourceHost,
+      targetHost: e.targetHost,
+      attackerId: e.attackerId,
+      label: this.formatStageLabel(e.stage || this.mapStageFromType(e.type, e.description)),
+      detail: e.description
     }));
   }
 
@@ -176,27 +190,113 @@ export class DashboardService {
     const query: any = {};
     if (attackerId) query.attackerId = attackerId;
 
-    const [movements, hosts] = await Promise.all([
+    const [movements, vmStatuses, attackers, credentials] = await Promise.all([
       LateralMovement.find(query).lean(),
-      DecoyHost.find().lean()
+      VMStatus.find().lean(),
+      Attacker.find(attackerId ? { attackerId } : {}).lean(),
+      Credential.find(attackerId ? { attackerId } : {}).lean()
     ]);
 
-    const nodes = hosts.map(h => ({
-      id: h.hostname,
-      label: h.hostname,
-      type: h.segment,
-      status: h.status,
-      os: h.os
-    }));
+    const nodesMap = new Map<string, any>();
 
-    const edges = movements.map(m => ({
-      from: m.sourceHost,
-      to: m.targetHost,
-      label: m.method,
-      successful: m.successful
-    }));
+    for (const vm of vmStatuses) {
+      nodesMap.set(vm.vmName, {
+        id: vm.vmName,
+        label: vm.vmName,
+        type: 'vm',
+        status: vm.status || 'unknown'
+      });
+    }
 
-    return { nodes, edges };
+    for (const attacker of attackers) {
+      const attackerNodeId = `attacker:${attacker.ipAddress}`;
+      nodesMap.set(attackerNodeId, {
+        id: attackerNodeId,
+        label: attacker.ipAddress,
+        type: 'attacker',
+        status: attacker.status || 'Active'
+      });
+
+      if (attacker.entryPoint) {
+        nodesMap.set(attacker.entryPoint, nodesMap.get(attacker.entryPoint) || {
+          id: attacker.entryPoint,
+          label: attacker.entryPoint,
+          type: 'vm',
+          status: 'unknown'
+        });
+      }
+    }
+
+    const edges: Array<{
+      from: string;
+      to: string;
+      label: string;
+      relation: 'entry' | 'lateral_movement' | 'credential_use';
+      successful?: boolean;
+    }> = [];
+
+    for (const attacker of attackers) {
+      if (!attacker.entryPoint) continue;
+      edges.push({
+        from: `attacker:${attacker.ipAddress}`,
+        to: attacker.entryPoint,
+        label: 'entry',
+        relation: 'entry',
+        successful: true
+      });
+    }
+
+    for (const movement of movements) {
+      edges.push({
+        from: movement.sourceHost,
+        to: movement.targetHost,
+        label: movement.method,
+        relation: 'lateral_movement',
+        successful: movement.successful
+      });
+    }
+
+    const attackerById = new Map(attackers.map((a: any) => [a.attackerId, a]));
+    for (const credential of credentials) {
+      const attacker = attackerById.get(credential.attackerId);
+      if (!attacker?.ipAddress || !credential.decoyHost) continue;
+      edges.push({
+        from: `attacker:${attacker.ipAddress}`,
+        to: credential.decoyHost,
+        label: credential.username,
+        relation: 'credential_use',
+        successful: true
+      });
+    }
+
+    return { nodes: Array.from(nodesMap.values()), edges };
+  }
+
+  async getSecurityPostureScore() {
+    const [attackers, credentials, lateralMoves] = await Promise.all([
+      Attacker.countDocuments({ status: 'Active' }),
+      Credential.countDocuments(),
+      LateralMovement.countDocuments({ successful: true })
+    ]);
+
+    const rawScore = attackers * 20 + credentials * 10 + lateralMoves * 15;
+    const score = Math.max(0, Math.min(100, rawScore));
+
+    let threatLevel: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL' = 'LOW';
+    if (score >= 90) threatLevel = 'CRITICAL';
+    else if (score >= 70) threatLevel = 'HIGH';
+    else if (score >= 40) threatLevel = 'MEDIUM';
+
+    return {
+      score,
+      maxScore: 100,
+      threatLevel,
+      factors: {
+        attackers,
+        credentials,
+        lateralMoves
+      }
+    };
   }
 
   async getCommandActivity(attackerId?: string, limit = 10) {
@@ -324,5 +424,34 @@ export class DashboardService {
     const hours = Math.floor(minutes / 60);
     const mins = Math.round(minutes % 60);
     return `${hours}h ${mins}m`;
+  }
+
+  private mapStageFromType(type: string, description: string): string {
+    const lowerType = String(type || '').toLowerCase();
+    const lowerDescription = String(description || '').toLowerCase();
+
+    if (lowerType.includes('discovery') || lowerDescription.includes('nmap') || lowerDescription.includes('recon')) return 'RECON';
+    if (lowerType.includes('initial access')) return 'INITIAL_ACCESS';
+    if (lowerType.includes('credential')) return 'CREDENTIAL_ACCESS';
+    if (lowerType.includes('lateral')) return 'LATERAL_MOVEMENT';
+    if (lowerType.includes('privilege')) return 'PRIVILEGE_ESCALATION';
+    if (lowerType.includes('command')) return 'EXECUTION';
+    if (lowerType.includes('exfiltration')) return 'EXFILTRATION';
+    return 'OTHER';
+  }
+
+  private formatStageLabel(stage: string): string {
+    const labelMap: Record<string, string> = {
+      RECON: 'Recon',
+      INITIAL_ACCESS: 'Initial Access',
+      CREDENTIAL_ACCESS: 'Credential Access',
+      LATERAL_MOVEMENT: 'Lateral Movement',
+      PRIVILEGE_ESCALATION: 'Privilege Escalation',
+      EXECUTION: 'Execution',
+      EXFILTRATION: 'Exfiltration',
+      OTHER: 'Activity'
+    };
+
+    return labelMap[stage] || 'Activity';
   }
 }

@@ -5,9 +5,11 @@ import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
 import * as fs from 'fs';
 import { VMStatus } from '../models';
+import CompanyBlueprintModel from '../models/CompanyBlueprint';
 
 export class CRDTSyncService extends EventEmitter {
   private syncInterval?: NodeJS.Timeout;
+  private vmStatusInterval?: NodeJS.Timeout;
   private vagrantDir: string;
   private isSyncing: boolean = false;
 
@@ -24,10 +26,10 @@ export class CRDTSyncService extends EventEmitter {
       }
     }, intervalMs);
   
-    // NEW: VM status updates every 30 seconds
-    setInterval(() => {
+    // Reconciliation loop: refresh VM status every 10 seconds.
+    this.vmStatusInterval = setInterval(() => {
       this.updateVMStatusInDB().catch(err => logger.error('VM status update error:', err));
-    }, 30000);
+    }, 10000);
   
     // Initial VM status update
     this.updateVMStatusInDB().catch(err => logger.error('Initial VM status error:', err));
@@ -37,6 +39,11 @@ export class CRDTSyncService extends EventEmitter {
   
   // Converted to a proper class method
   private async updateVMStatusInDB() {
+    if (await this.isDecoyApplyInProgress()) {
+      logger.info('Skipping VM status refresh while decoy apply is in progress');
+      return;
+    }
+
     const { exec } = require('child_process');
     const util = require('util');
     const execAsync = util.promisify(exec);
@@ -54,7 +61,13 @@ export class CRDTSyncService extends EventEmitter {
     const vmDirs = entries
       .filter((entry: any) => entry.isDirectory())
       .map((entry: any) => entry.name)
-      .filter((name: string) => name.startsWith('fake-') || name === 'gateway-vm');
+      .filter((name: string) => fs.existsSync(path.join(vagrantDir, name, 'Vagrantfile')));
+
+    if (vmDirs.length === 0) {
+      await VMStatus.deleteMany({});
+    } else {
+      await VMStatus.deleteMany({ vmName: { $nin: vmDirs } });
+    }
 
     for (const vmName of vmDirs) {
       const vmPath = path.join(vagrantDir, vmName);
@@ -166,9 +179,18 @@ export class CRDTSyncService extends EventEmitter {
       clearInterval(this.syncInterval);
       this.syncInterval = undefined;
     }
+    if (this.vmStatusInterval) {
+      clearInterval(this.vmStatusInterval);
+      this.vmStatusInterval = undefined;
+    }
   }
 
   async performSync() {
+    if (await this.isDecoyApplyInProgress()) {
+      logger.info('Skipping CRDT sync while decoy apply is in progress');
+      return;
+    }
+
     this.isSyncing = true;
     let newEventsCount = 0;
     let attackersFound = 0;
@@ -180,7 +202,7 @@ export class CRDTSyncService extends EventEmitter {
 
       const vmDirs = fs.readdirSync(this.vagrantDir)
         .filter(dir => fs.statSync(path.join(this.vagrantDir, dir)).isDirectory())
-        .filter(dir => dir.startsWith('fake-') || dir === 'gateway-vm');
+        .filter(dir => fs.existsSync(path.join(this.vagrantDir, dir, 'Vagrantfile')));
 
       for (const vm of vmDirs) {
         try {
@@ -219,6 +241,18 @@ export class CRDTSyncService extends EventEmitter {
       this.emit('syncError', error);
     } finally {
       this.isSyncing = false;
+    }
+  }
+
+  private async isDecoyApplyInProgress(): Promise<boolean> {
+    try {
+      const active = await CompanyBlueprintModel.exists({ 'deployment.status': 'applying' });
+      return Boolean(active);
+    } catch (error) {
+      logger.warn('Failed to query decoy apply status, continuing normal sync loop', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
     }
   }
 
@@ -317,6 +351,7 @@ export class CRDTSyncService extends EventEmitter {
     const event = new AttackEvent({
       eventId,
       attackerId,
+      stage: 'RECON',
       type: 'Discovery',
       technique: 'T1083',
       tactic: 'Discovery',
@@ -371,6 +406,7 @@ export class CRDTSyncService extends EventEmitter {
       eventId,
       timestamp: new Date(ts * 1000),
       attackerId,
+      stage: this.getStageFromType(type, action),
       type,
       technique,
       tactic: this.getTacticFromType(type),
@@ -427,6 +463,7 @@ export class CRDTSyncService extends EventEmitter {
     await AttackEvent.create({
       eventId: `evt-${uuidv4()}`,
       attackerId,
+      stage: 'CREDENTIAL_ACCESS',
       type: 'Credential Theft',
       technique: 'T1003',
       tactic: 'Credential Access',
@@ -447,6 +484,7 @@ export class CRDTSyncService extends EventEmitter {
         eventId,
         timestamp: new Date(ts * 1000),
         attackerId: `APT-${node.replace(/\./g, '-')}`,
+        stage: 'INITIAL_ACCESS',
         type: 'Initial Access',
         technique: 'T1078',
         tactic: 'Initial Access',
@@ -500,6 +538,20 @@ export class CRDTSyncService extends EventEmitter {
       'Defense Evasion': 'Defense Evasion'
     };
     return tacticMap[type] || 'Unknown';
+  }
+
+  private getStageFromType(type: string, action = ''): string {
+    const lowerType = type.toLowerCase();
+    const lowerAction = action.toLowerCase();
+
+    if (lowerType.includes('discovery') || lowerAction.includes('nmap') || lowerAction.includes('recon')) return 'RECON';
+    if (lowerType.includes('initial access')) return 'INITIAL_ACCESS';
+    if (lowerType.includes('credential')) return 'CREDENTIAL_ACCESS';
+    if (lowerType.includes('lateral')) return 'LATERAL_MOVEMENT';
+    if (lowerType.includes('privilege')) return 'PRIVILEGE_ESCALATION';
+    if (lowerType.includes('command')) return 'EXECUTION';
+    if (lowerType.includes('exfiltration')) return 'EXFILTRATION';
+    return 'OTHER';
   }
 
   private calculateCredentialRisk(username: string, password: string): number {
