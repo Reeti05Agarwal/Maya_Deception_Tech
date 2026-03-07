@@ -1,18 +1,18 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import { Server } from 'http';
 import { CRDTSyncService } from '../services/CRDTSyncService';
-import { SimulationService } from '../services/SimulationService';
+import { RealSimulationService } from '../services/RealSimulationService';
 import { DashboardService } from '../services/DashboardService';
 import { logger } from '../utils/logger';
 
 export class WebSocketHandler {
   private wss: WebSocketServer;
   private crdtSync: CRDTSyncService;
-  private simulationService: SimulationService;
+  private simulationService: RealSimulationService;
   private dashboardService: DashboardService;
   private clients: Set<WebSocket> = new Set();
 
-  constructor(server: Server, crdtSync: CRDTSyncService, simulationService: SimulationService) {
+  constructor(server: Server, crdtSync: CRDTSyncService, simulationService: RealSimulationService) {
     this.wss = new WebSocketServer({ server, path: '/ws' });
     this.crdtSync = crdtSync;
     this.simulationService = simulationService;
@@ -25,28 +25,15 @@ export class WebSocketHandler {
     this.wss.on('connection', async (ws: WebSocket) => {
       logger.info('New WebSocket client connected');
       this.clients.add(ws);
-  
-      try {
-        // Fetch all data for initial state
-        const [stats, activeAttackers] = await Promise.all([
-          this.dashboardService.getDashboardStats(),
-          this.getActiveAttackers()
-        ]);
-  
-        // Send INITIAL_STATE with data
-        ws.send(JSON.stringify({
-          type: 'INITIAL_STATE',
-          data: { 
-            stats, 
-            activeAttackers,
-            // Include other data as needed
-          },
-          timestamp: new Date().toISOString()
-        }));
-      } catch (error) {
-        logger.error('Error sending initial state:', error);
-      }
 
+      // Send connection acknowledgment immediately
+      ws.send(JSON.stringify({
+        type: 'CONNECTION_ACK',
+        message: 'WebSocket connected',
+        timestamp: new Date().toISOString()
+      }));
+
+      // Fetch and send initial state in a single message
       try {
         const [stats, activeAttackers, timeline, mitreMatrix, lateralMovement, commands, behavior, incidents] = await Promise.all([
           this.dashboardService.getDashboardStats(),
@@ -66,6 +53,12 @@ export class WebSocketHandler {
         }));
       } catch (error) {
         logger.error('Error sending initial state:', error);
+        // Send error to client but keep connection open
+        ws.send(JSON.stringify({
+          type: 'ERROR',
+          message: 'Failed to load initial dashboard data',
+          timestamp: new Date().toISOString()
+        }));
       }
 
       ws.on('message', async (message: string) => {
@@ -179,7 +172,12 @@ export class WebSocketHandler {
     const messageStr = JSON.stringify(message);
     this.clients.forEach(client => {
       if (client.readyState === WebSocket.OPEN) {
-        client.send(messageStr);
+        try {
+          client.send(messageStr);
+        } catch (error) {
+          logger.error('Error broadcasting to client:', error);
+          // Don't remove client immediately on send error, let the error handler do it
+        }
       }
     });
   }

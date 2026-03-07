@@ -34,7 +34,7 @@ export function useAttackerDetail(
     const abortController = new AbortController()
     abortRef.current = abortController
 
-    const url = `/api/dashboard/attacker/${encodeURIComponent(id)}`
+    const url = `http://localhost:3001/api/dashboard/attacker/${encodeURIComponent(id)}`
 
     try {
       const res = await fetch(url, {

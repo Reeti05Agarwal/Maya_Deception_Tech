@@ -87,7 +87,13 @@ SSH Keys:
 ssh-keygen -t ed25519
 cat /home/admin/.ssh/id_ed25519.pub
 ssh-copy-id admin@10.20.20.50
+```
 
+Deletion
+```bash
+sudo virsh list --all
+sudo virsh destroy gateway-vm_default
+sudo virsh undefine gateway-vm_default --remove-all-storage
 
 ```
 

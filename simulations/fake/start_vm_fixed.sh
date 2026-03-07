@@ -9,13 +9,14 @@ echo -e "${GREEN}=========================================${NC}"
 echo -e "${GREEN}Starting Maya Deception Fabric VMs${NC}"
 echo -e "${GREEN}=========================================${NC}"
 
-# Function to check if VM is really running (using virsh)
+# Function to check if VM is running using Vagrant
 is_vm_running() {
     local vm=$1
-    # Check both with and without _default suffix
-    if sudo virsh domstate "${vm}_default" 2>/dev/null | grep -q "running"; then
-        return 0
-    elif sudo virsh domstate "$vm" 2>/dev/null | grep -q "running"; then
+    cd "$vm" || return 1
+    # Check Vagrant status
+    status=$(vagrant status --machine-readable | grep ",state," | awk -F',' '{print $4}')
+    cd ..
+    if [[ "$status" == "running" ]]; then
         return 0
     else
         return 1
@@ -33,40 +34,31 @@ start_vm() {
     fi
     
     echo -e "${YELLOW}Starting $vm with provider: $provider...${NC}"
-    cd "$vm"
-    
-    # Check if VM is really running using virsh
+
     if is_vm_running "$vm"; then
-        echo -e "${GREEN}✅ $vm is already running (confirmed by virsh)${NC}"
-        cd ..
-        return 0
-    fi
-    
-    # Try to start the VM
-    echo "  Running vagrant up..."
-    vagrant up --provider="$provider"
-    
-    if [ $? -eq 0 ]; then
-        # Wait a bit for VM to fully boot
-        sleep 5
-        
-        # Verify it's running with virsh
-        if is_vm_running "$vm"; then
-            echo -e "${GREEN}✅ Successfully started $vm${NC}"
-            
-            # Get IP address
-            ip=$(vagrant ssh -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\r')
-            if [ -n "$ip" ]; then
-                echo -e "   IP Address: $ip"
-            fi
-        else
-            echo -e "${RED}❌ VM $vm started but not detected by virsh${NC}"
-        fi
+        echo -e "${GREEN}✅ $vm is already running${NC}"
     else
-        echo -e "${RED}❌ Failed to start $vm${NC}"
+        cd "$vm" || return 1
+        echo "  Running vagrant up..."
+        vagrant up --provider="$provider"
+        if [[ $? -ne 0 ]]; then
+            echo -e "${RED}❌ Failed to start $vm${NC}"
+            cd ..
+            return 1
+        fi
+        cd ..
+        echo -e "${GREEN}✅ Successfully started $vm${NC}"
     fi
-    
+
+    # Get IP address using ip addr (works on BusyBox)
+    cd "$vm" || return 1
+    ip=$(vagrant ssh -c "ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1 | head -1" 2>/dev/null | tr -d '\r')
     cd ..
+    if [[ -n "$ip" ]]; then
+        echo -e "   IP Address: $ip"
+    else
+        echo -e "${YELLOW}⚠️ IP address not found for $vm. Check network configuration.${NC}"
+    fi
     echo ""
 }
 
@@ -78,17 +70,12 @@ start_vm "gateway-vm" "libvirt"
 echo -e "${YELLOW}Waiting 10 seconds for gateway VM to initialize...${NC}"
 sleep 10
 
-# Start all fake VMs
+# Start all honeypot VMs
 echo -e "${GREEN}Step 2: Starting Honeypot VMs${NC}"
-
 FAKE_VMS="fake-ftp-01 fake-jump-01 fake-rdp-01 fake-smb-01 fake-ssh-01 fake-web-01 fake-web-02 fake-web-03"
 
 for vm in $FAKE_VMS; do
-    if [ -d "$vm" ]; then
-        start_vm "$vm" "libvirt"
-    else
-        echo -e "${RED}❌ Directory $vm not found${NC}"
-    fi
+    start_vm "$vm" "libvirt"
 done
 
 echo -e "${GREEN}=========================================${NC}"

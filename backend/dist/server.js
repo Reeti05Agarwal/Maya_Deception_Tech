@@ -16,15 +16,22 @@ const errorHandler_1 = require("./middleware/errorHandler");
 const logger_1 = require("./utils/logger");
 const CRDTSyncService_1 = require("./services/CRDTSyncService");
 const WebSocketHandler_1 = require("./websocket/WebSocketHandler");
-const SimulationService_1 = require("./services/SimulationService");
+const RealSimulationService_1 = require("./services/RealSimulationService");
 const dashboard_1 = __importDefault(require("./routes/dashboard"));
 const simulation_1 = __importDefault(require("./routes/simulation"));
 const VMStatus_1 = __importDefault(require("./models/VMStatus"));
+const node_cron_1 = __importDefault(require("node-cron"));
+const MitreSyncService_1 = require("./services/MitreSyncService");
 dotenv_1.default.config();
 const app = (0, express_1.default)();
 const server = (0, http_1.createServer)(app);
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/maya_deception';
+node_cron_1.default.schedule('0 3 * * *', async () => {
+    console.log('[Scheduler] Starting daily MITRE sync...');
+    const syncService = new MitreSyncService_1.MitreSyncService();
+    await syncService.sync();
+});
 // Security middleware
 app.use((0, helmet_1.default)({
     contentSecurityPolicy: false,
@@ -57,7 +64,7 @@ mongoose_1.default.connect(MONGODB_URI)
 });
 // Initialize services
 const crdtSync = new CRDTSyncService_1.CRDTSyncService();
-const simulationService = new SimulationService_1.SimulationService();
+const simulationService = new RealSimulationService_1.RealSimulationService();
 const wsHandler = new WebSocketHandler_1.WebSocketHandler(server, crdtSync, simulationService);
 // API Routes
 app.use('/api/dashboard', dashboard_1.default);
@@ -72,19 +79,7 @@ app.get('/health', (req, res) => {
         mongodb: mongoose_1.default.connection.readyState === 1 ? 'connected' : 'disconnected'
     });
 });
-// Root endpoint
-app.get('/', (req, res) => {
-    res.json({
-        name: 'Maya Deception Fabric Dashboard API',
-        version: '1.0.0',
-        endpoints: {
-            dashboard: '/api/dashboard',
-            health: '/health',
-            websocket: 'ws://localhost:' + PORT + '/ws'
-        }
-    });
-});
-// FIXED: VM Status endpoint with proper error handling and logging
+// VM Status endpoint with proper error handling
 app.get('/api/vms', async (req, res) => {
     try {
         logger_1.logger.info('Fetching VM status from database...');
@@ -93,7 +88,7 @@ app.get('/api/vms', async (req, res) => {
         if (!vms || vms.length === 0) {
             logger_1.logger.warn('No VMs found in database');
         }
-        // Transform to expected format - match frontend expectations exactly
+        // Transform to expected format
         const formattedVMs = vms.map(vm => ({
             name: vm.vmName,
             status: vm.status,
@@ -119,6 +114,48 @@ app.get('/api/vms', async (req, res) => {
         });
     }
 });
+// Attacker summary endpoint (for dashboard)
+app.get('/api/attackers/summary', async (req, res) => {
+    try {
+        const { Attacker } = require('../src/models');
+        const attackers = await Attacker.find().sort({ lastSeen: -1 }).limit(100).lean();
+        const summary = {
+            total: attackers.length,
+            critical: attackers.filter((a) => a.riskLevel === 'Critical').length,
+            high: attackers.filter((a) => a.riskLevel === 'High').length,
+            medium: attackers.filter((a) => a.riskLevel === 'Medium').length,
+            low: attackers.filter((a) => a.riskLevel === 'Low').length,
+            attackers: attackers.map((a) => ({
+                id: a.attackerId,
+                ip: a.ipAddress,
+                riskLevel: a.riskLevel,
+                firstSeen: a.firstSeen,
+                lastSeen: a.lastSeen,
+                dwellTime: a.dwellTime,
+                status: a.status
+            }))
+        };
+        res.json(summary);
+    }
+    catch (error) {
+        logger_1.logger.error('Failed to fetch attacker summary:', error);
+        res.status(500).json({ error: 'Failed to fetch attacker data' });
+    }
+});
+// Root endpoint
+app.get('/', (req, res) => {
+    res.json({
+        name: 'Maya Deception Fabric Dashboard API',
+        version: '1.0.0',
+        endpoints: {
+            dashboard: '/api/dashboard',
+            vms: '/api/vms',
+            attackers: '/api/attackers/summary',
+            health: '/health',
+            websocket: 'ws://localhost:' + PORT + '/ws'
+        }
+    });
+});
 // Error handling
 app.use(errorHandler_1.errorHandler);
 // Start server
@@ -129,35 +166,34 @@ server.listen(PORT, () => {
     const syncInterval = parseInt(process.env.CRDT_SYNC_INTERVAL || '10000');
     crdtSync.startSyncLoop(syncInterval);
 });
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    logger_1.logger.info('SIGTERM received, shutting down gracefully');
-    crdtSync.stopSyncLoop();
-    server.close(() => {
-        mongoose_1.default.connection.close()
-            .then(() => {
-            logger_1.logger.info('Server closed');
+// Graceful shutdown with timeout
+const gracefulShutdown = async (signal) => {
+    logger_1.logger.info(`${signal} received, shutting down gracefully`);
+    // Stop accepting new requests
+    server.close(async () => {
+        logger_1.logger.info('HTTP server closed');
+        // Stop sync loops
+        crdtSync.stopSyncLoop();
+        // Close MongoDB connection with timeout
+        try {
+            await Promise.race([
+                mongoose_1.default.connection.close(),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('MongoDB close timeout')), 5000))
+            ]);
+            logger_1.logger.info('MongoDB connection closed');
             process.exit(0);
-        })
-            .catch((err) => {
+        }
+        catch (err) {
             logger_1.logger.error('Error closing MongoDB connection:', err);
             process.exit(1);
-        });
+        }
     });
-});
-process.on('SIGINT', () => {
-    logger_1.logger.info('SIGINT received, shutting down gracefully');
-    crdtSync.stopSyncLoop();
-    server.close(() => {
-        mongoose_1.default.connection.close()
-            .then(() => {
-            logger_1.logger.info('Server closed');
-            process.exit(0);
-        })
-            .catch((err) => {
-            logger_1.logger.error('Error closing MongoDB connection:', err);
-            process.exit(1);
-        });
-    });
-});
+    // Force exit after 10 seconds
+    setTimeout(() => {
+        logger_1.logger.error('Could not close connections in time, forcefully exiting');
+        process.exit(1);
+    }, 10000);
+};
+process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 //# sourceMappingURL=server.js.map

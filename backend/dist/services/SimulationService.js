@@ -1,4 +1,5 @@
 "use strict";
+// services/SimulationService.ts
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.SimulationService = void 0;
 const events_1 = require("events");

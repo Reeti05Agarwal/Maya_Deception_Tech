@@ -6,7 +6,7 @@ import type { AttackerDetails, AttackerSummary } from "@/types"
  */
 export async function getAttackerDetailsFromApi(attackerId: string): Promise<AttackerDetails | null> {
   try {
-    const res = await fetch(`/api/dashboard/attacker/${encodeURIComponent(attackerId)}`, {
+    const res = await fetch(`http://localhost:3001/api/dashboard/attacker/${encodeURIComponent(attackerId)}`, {
       cache: 'no-store',
       headers: {
         'Accept': 'application/json',

@@ -20,6 +20,7 @@ export type Attacker = {
 }
 
 export type TimelineEvent = {
+  eventId: string;
   time: string
   label: string
   detail?: string

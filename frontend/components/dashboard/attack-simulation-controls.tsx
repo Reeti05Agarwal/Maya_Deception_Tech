@@ -83,8 +83,11 @@ export function AttackSimulationControls() {
 
   const runSimulation = async (scenario: SimulationScenario) => {
     setIsRunning(scenario.id)
-    
+
     try {
+      // FIRST: Refresh VM cache to ensure we have latest running VMs
+      await fetch("/api/simulation/refresh-vms", { method: "POST" })
+
       const response = await fetch(scenario.endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -96,23 +99,23 @@ export function AttackSimulationControls() {
       }
 
       const result = await response.json()
-      
+
       setLastRun(prev => ({ ...prev, [scenario.id]: new Date() }))
-      
+
       const attackType = result.real ? "REAL" : "MOCK"
       toast({
         title: `${attackType} Simulation ${result.success ? "Started" : "Failed"}`,
-        description: result.real 
+        description: result.real
           ? `${scenario.name} simulation executed on REAL VM infrastructure`
           : `${scenario.name} simulation (VM not available - using mock data)`,
         variant: result.real ? "default" : "destructive"
       })
-      
+
       // Trigger immediate CRDT sync to propagate the simulation data
       if (result.success) {
         await fetch("/api/simulation/trigger-sync", { method: "POST" })
       }
-      
+
     } catch (error) {
       toast({
         title: "Simulation Error",

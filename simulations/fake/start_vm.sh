@@ -53,9 +53,9 @@ start_vm() {
         # Verify it's running with virsh
         if is_vm_running "$vm"; then
             echo -e "${GREEN}✅ Successfully started $vm${NC}"
-            
-            # Get IP address
-            ip=$(vagrant ssh -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\r')
+
+            # Get IP address using ip addr (works on BusyBox)
+            ip=$(vagrant ssh -c "ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1 | head -1" 2>/dev/null | tr -d '\r')
             if [ -n "$ip" ]; then
                 echo -e "   IP Address: $ip"
             fi

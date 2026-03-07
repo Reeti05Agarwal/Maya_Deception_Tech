@@ -6,3 +6,7 @@
 node_modules/
 .next/
 .env
+.aider*
+backend/dist/
+backend/logs/
+.vagrant/

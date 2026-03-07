@@ -18,8 +18,10 @@ async function seedVMs() {
       { vmName: 'fake-jump-01', hostname: 'fake-jump-01', status: 'unknown' },
       { vmName: 'fake-rdp-01', hostname: 'fake-rdp-01', status: 'unknown' },
       { vmName: 'fake-smb-01', hostname: 'fake-smb-01', status: 'unknown' },
+      { vmName: 'fake-ssh-01', hostname: 'fake-ssh-01', status: 'unknown' },  // Added missing VM
       { vmName: 'fake-web-01', hostname: 'fake-web-01', status: 'unknown' },
       { vmName: 'fake-web-02', hostname: 'fake-web-02', status: 'unknown' },
+      { vmName: 'fake-web-03', hostname: 'fake-web-03', status: 'unknown' },  // Added missing VM
       { vmName: 'gateway-vm', hostname: 'gateway-vm', status: 'unknown' },
     ];
 

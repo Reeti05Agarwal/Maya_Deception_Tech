@@ -1,3 +1,5 @@
+// services/SimulationService.ts
+
 import { EventEmitter } from 'events';
 import { Attacker, AttackEvent, Credential, LateralMovement } from '../models';
 import { logger } from '../utils/logger';
