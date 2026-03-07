@@ -10,8 +10,13 @@ export function SystemHealthIndicator() {
   const { connected } = useSharedWebSocket()
   const [backendHealth, setBackendHealth] = useState<"healthy" | "degraded" | "offline">("healthy")
   const [mongodbStatus, setMongodbStatus] = useState<"connected" | "disconnected">("connected")
-  const [lastCheck, setLastCheck] = useState<Date>(new Date())
+  const [lastCheck, setLastCheck] = useState<Date | null>(null)
   const [responseTime, setResponseTime] = useState<number>(0)
+  const [mounted, setMounted] = useState(false)
+
+  useEffect(() => {
+    setMounted(true)
+  }, [])
 
   useEffect(() => {
     const checkHealth = async () => {
@@ -114,8 +119,8 @@ export function SystemHealthIndicator() {
       )}
 
       {/* Last Check */}
-      <span className="text-muted-foreground text-xs">
-        Updated: {lastCheck.toLocaleTimeString()}
+      <span className="text-muted-foreground text-xs" suppressHydrationWarning>
+        Updated: {mounted && lastCheck ? lastCheck.toLocaleTimeString() : "--:--:--"}
       </span>
     </div>
   )

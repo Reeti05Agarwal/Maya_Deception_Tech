@@ -134,8 +134,8 @@ export function RealTimeAlerts() {
       case 'critical': return <AlertTriangle className="h-5 w-5 text-red-500" />
       case 'high': return <Shield className="h-5 w-5 text-orange-500" />
       case 'medium': return <Activity className="h-5 w-5 text-yellow-500" />
-      case 'low': return <Bell className="h-5 w-5 text-blue-500" />
-      case 'info': return <CheckCircle className="h-5 w-5 text-green-500" />
+      case 'low': return <Bell className="h-5 w-5 text-yellow-500" />
+      case 'info': return <CheckCircle className="h-5 w-5 text-blue-500" />
     }
   }
 
@@ -144,8 +144,8 @@ export function RealTimeAlerts() {
       case 'critical': return 'border-red-500/50 bg-red-500/10'
       case 'high': return 'border-orange-500/50 bg-orange-500/10'
       case 'medium': return 'border-yellow-500/50 bg-yellow-500/10'
-      case 'low': return 'border-blue-500/50 bg-blue-500/10'
-      case 'info': return 'border-green-500/50 bg-green-500/10'
+      case 'low': return 'border-yellow-500/50 bg-yellow-500/10'
+      case 'info': return 'border-blue-500/50 bg-blue-500/10'
     }
   }
 

@@ -578,6 +578,7 @@ export class SimulationService extends EventEmitter {
     const event = new AttackEvent({
       eventId: `evt-${uuidv4()}`,
       timestamp: new Date(),
+      stage: eventData.stage || this.inferStage(eventData),
       ...eventData
     });
     await event.save();
@@ -595,5 +596,20 @@ export class SimulationService extends EventEmitter {
     logger.info('Manual CRDT sync triggered via API');
     this.emit('triggerSync');
     return { success: true, message: 'Sync triggered' };
+  }
+
+  private inferStage(eventData: { type?: string; tactic?: string; description?: string }): string {
+    const type = String(eventData.type || '').toLowerCase();
+    const tactic = String(eventData.tactic || '').toLowerCase();
+    const description = String(eventData.description || '').toLowerCase();
+
+    if (type.includes('discovery') || description.includes('nmap') || description.includes('recon')) return 'RECON';
+    if (type.includes('initial access') || tactic.includes('initial access')) return 'INITIAL_ACCESS';
+    if (type.includes('credential') || tactic.includes('credential')) return 'CREDENTIAL_ACCESS';
+    if (type.includes('lateral') || tactic.includes('lateral')) return 'LATERAL_MOVEMENT';
+    if (type.includes('privilege') || tactic.includes('privilege')) return 'PRIVILEGE_ESCALATION';
+    if (type.includes('command') || tactic.includes('execution')) return 'EXECUTION';
+    if (type.includes('exfiltration') || tactic.includes('exfiltration')) return 'EXFILTRATION';
+    return 'OTHER';
   }
 }
