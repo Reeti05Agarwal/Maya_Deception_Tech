@@ -1,0 +1,14 @@
+<network>
+  <name>control_net</name>
+
+  <!-- Completely isolated management plane -->
+  <forward mode='none'/>
+
+  <bridge name='virbr-control' stp='on' delay='0'/>
+
+  <ip address='10.99.0.1' netmask='255.255.255.0'>
+    <dhcp>
+      <range start='10.99.0.100' end='10.99.0.200'/>
+    </dhcp>
+  </ip>
+</network>

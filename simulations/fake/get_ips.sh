@@ -19,8 +19,8 @@ for vm in $VMS; do
         # Debian/Ubuntu - try to get eth1 IP specifically
         ip=$(vagrant ssh -c "ip addr show eth1 | grep 'inet ' | awk '{print \$2}' | cut -d/ -f1" 2>/dev/null | tr -d '\r')
         if [ -z "$ip" ]; then
-            # Fallback to hostname -I
-            ip=$(vagrant ssh -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\r')
+            # Fallback to ip addr or hostname -I for BusyBox
+            ip=$(vagrant ssh -c "ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1 | head -1" 2>/dev/null | tr -d '\r')
         fi
     fi
     

@@ -1,13 +1,13 @@
 import { Server } from 'http';
 import { CRDTSyncService } from '../services/CRDTSyncService';
-import { SimulationService } from '../services/SimulationService';
+import { RealSimulationService } from '../services/RealSimulationService';
 export declare class WebSocketHandler {
     private wss;
     private crdtSync;
     private simulationService;
     private dashboardService;
     private clients;
-    constructor(server: Server, crdtSync: CRDTSyncService, simulationService: SimulationService);
+    constructor(server: Server, crdtSync: CRDTSyncService, simulationService: RealSimulationService);
     private setupWebSocket;
     private setupEventListeners;
     private handleMessage;

@@ -58,10 +58,10 @@ if [ -d "fake-web-03" ]; then
     # Check if VM is running
     if vagrant status | grep -q "running"; then
         vagrant ssh << 'EOF'
-          echo "Simulating attacker 192.20.100.100..."
-          sudo /usr/local/bin/syslogd-helper visit 192.20.100.100 /fake-smb-01
-          sudo /usr/local/bin/syslogd-helper action 192.20.100.100 /fake-smb-01 "nmap scan"
-          sudo /usr/local/bin/syslogd-helper move 192.20.100.100 /tmp
+          echo "Simulating attacker 192.20.101.101..."
+          sudo /usr/local/bin/syslogd-helper visit 192.20.101.101 /fake-smb-01
+          sudo /usr/local/bin/syslogd-helper action 192.20.101.101 /fake-smb-01 "nmap scan"
+          sudo /usr/local/bin/syslogd-helper move 192.20.101.101 /tmp
           sudo /usr/local/bin/syslogd-helper cred "admin:Winter2023!"
           
           echo "Simulating attacker 192.40.20.201..."

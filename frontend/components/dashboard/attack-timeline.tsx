@@ -50,7 +50,7 @@ export function AttackTimeline({ events, loading }: AttackTimelineProps) {
         {loading || !events
           ? Array.from({ length: 5 }).map((_, idx) => (
               <div
-                key={idx}
+                key={`skeleton-${idx}`}
                 className="flex items-center gap-3 rounded-md border px-3 py-2.5 bg-secondary/20 border-border"
               >
                 <Skeleton className="w-2 h-2 rounded-full shrink-0" />
@@ -60,9 +60,9 @@ export function AttackTimeline({ events, loading }: AttackTimelineProps) {
                 <ChevronRight className="h-4 w-4 text-muted-foreground ml-auto shrink-0" />
               </div>
             ))
-          : events.map((event) => (
+          : events.map((event, index) => (
               <div
-                key={event.time + event.label}
+                key={event.eventId || `event-${event.time}-${index}`}
                 className={`flex items-center gap-3 rounded-md border px-3 py-2.5 ${getSeverityColor(event.severity)}`}
               >
                 <span className={`w-2 h-2 rounded-full shrink-0 ${getDotColor(event.severity)}`} />

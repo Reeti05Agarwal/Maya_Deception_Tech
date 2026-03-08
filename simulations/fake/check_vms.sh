@@ -29,7 +29,8 @@ check_vm() {
     # Get IP if running
     ip="N/A"
     if [ "$status" = "running" ]; then
-        ip=$(vagrant ssh -c "hostname -I | awk '{print \$1}'" 2>/dev/null | tr -d '\r')
+        # Try multiple methods: hostname -I (standard), ip addr (BusyBox fallback)
+        ip=$(vagrant ssh -c "hostname -I 2>/dev/null || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \$2}' | cut -d/ -f1" 2>/dev/null | tr -d '\r' | head -1)
         if [ -z "$ip" ]; then
             ip="No IP (still booting)"
         fi
@@ -50,8 +51,8 @@ check_vm() {
         fi
         
         # Check Docker
-        docker_status=$(vagrant ssh -c "sudo docker ps -q 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r')
-        if [ -n "$docker_status" ] && [ "$docker_status" -gt 0 ]; then
+        docker_status=$(vagrant ssh -c "sudo docker ps -q 2>/dev/null | wc -l" 2>/dev/null | tr -d '\r\n' | grep -oE '[0-9]+' | head -1)
+        if [ -n "$docker_status" ] && [ "$docker_status" -gt 0 ] 2>/dev/null; then
             echo -e "   ${GREEN}✓ $docker_status containers running${NC}"
         fi
     elif [ "$status" = "shutoff" ] || [ "$status" = "poweroff" ]; then

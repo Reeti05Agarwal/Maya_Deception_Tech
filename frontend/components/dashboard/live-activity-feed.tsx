@@ -38,6 +38,10 @@ export function LiveActivityFeed() {
   const { subscribe, connected } = useSharedWebSocket()
   const eventsRef = useRef<HTMLDivElement>(null)
   const [autoScroll, setAutoScroll] = useState(true)
+  const generateUniqueId = () =>
+  typeof crypto !== "undefined" && crypto.randomUUID
+    ? crypto.randomUUID()
+    : `evt-${Date.now()}-${Math.random().toString(36).slice(2)}`
 
   useEffect(() => {
     const unsubscribe = subscribe((msg) => {
@@ -46,7 +50,7 @@ export function LiveActivityFeed() {
       if (msg.type === 'NEW_EVENT') {
         const event = msg.data
         const newEvent: ActivityEvent = {
-          id: event.eventId || `evt-${Date.now()}`,
+          id: event.eventId || generateUniqueId(),
           type: event.type || 'Unknown',
           technique: event.technique,
           description: event.description || event.command || 'Activity detected',
@@ -66,7 +70,7 @@ export function LiveActivityFeed() {
       if (msg.type === 'SYNC_COMPLETE') {
         // Add a system event for sync completion
         const syncEvent: ActivityEvent = {
-          id: `sync-${Date.now()}`,
+          id: `sync-${generateUniqueId()}`,
           type: 'System',
           description: 'CRDT synchronization completed',
           severity: 'info',

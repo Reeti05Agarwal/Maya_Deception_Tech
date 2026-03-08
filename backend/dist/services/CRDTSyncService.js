@@ -34,6 +34,7 @@ var __importStar = (this && this.__importStar) || (function () {
 })();
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.CRDTSyncService = void 0;
+// backend/src/services/CRDTSyncService.ts
 const events_1 = require("events");
 const models_1 = require("../models");
 const logger_1 = require("../utils/logger");
@@ -41,37 +42,117 @@ const uuid_1 = require("uuid");
 const path = __importStar(require("path"));
 const fs = __importStar(require("fs"));
 const models_2 = require("../models");
+const MitreAttackService_1 = require("./MitreAttackService");
 class CRDTSyncService extends events_1.EventEmitter {
     constructor() {
         super();
         this.isSyncing = false;
-        this.vagrantDir = process.env.VAGRANT_DIR || '../simulations/fake';
+        // Use absolute path from services directory
+        this.vagrantDir = process.env.VAGRANT_DIR || path.join(__dirname, '../../simulations/fake');
     }
     startSyncLoop(intervalMs = 10000) {
-        // Existing CRDT sync
+        // CRDT sync for attacker data
         this.syncInterval = setInterval(() => {
             if (!this.isSyncing) {
                 this.performSync().catch(err => logger_1.logger.error('CRDT sync error:', err));
             }
         }, intervalMs);
-        // NEW: VM status updates every 30 seconds
-        setInterval(() => {
+        // VM status updates every 30 seconds
+        this.vmUpdateInterval = setInterval(() => {
             this.updateVMStatusInDB().catch(err => logger_1.logger.error('VM status update error:', err));
         }, 30000);
-        // Initial VM status update
+        // Initial updates
         this.updateVMStatusInDB().catch(err => logger_1.logger.error('Initial VM status error:', err));
         logger_1.logger.info(`Started CRDT sync loop with ${intervalMs}ms interval`);
     }
-    // Converted to a proper class method
+    stopSyncLoop() {
+        if (this.syncInterval) {
+            clearInterval(this.syncInterval);
+            this.syncInterval = undefined;
+        }
+        if (this.vmUpdateInterval) {
+            clearInterval(this.vmUpdateInterval);
+            this.vmUpdateInterval = undefined;
+        }
+    }
+    // NEW: Reliable VM status detection using virsh + vagrant fallback
+    async getVMStatus(vmName, vmPath) {
+        const { exec } = require('child_process');
+        const util = require('util');
+        const execAsync = util.promisify(exec);
+        // Try virsh first (fastest, most accurate)
+        try {
+            const { stdout } = await execAsync(`virsh domstate ${vmName} 2>&1`, { timeout: 5000 });
+            const state = stdout.trim().toLowerCase();
+            logger_1.logger.debug(`virsh domstate ${vmName}: ${state}`);
+            if (state === 'running') {
+                // Get IP if running
+                let ip = undefined;
+                try {
+                    const { stdout: ipOutput } = await execAsync(`virsh domifaddr ${vmName} | grep ipv4 | awk '{print $4}' | cut -d/ -f1`, { timeout: 5000 });
+                    ip = ipOutput.trim() || undefined;
+                }
+                catch (e) {
+                    // IP not critical
+                }
+                return { status: 'running', exists: true, ip };
+            }
+            if (state === 'shut off' || state === 'shutdown') {
+                return { status: 'stopped', exists: true };
+            }
+            if (state === 'paused') {
+                return { status: 'stopped', exists: true };
+            }
+            if (state.includes('error') || state.includes('failed')) {
+                return { status: 'error', exists: true };
+            }
+            // Domain not found or other state
+            if (state.includes('not found') || state.includes('no domain')) {
+                // Fall through to vagrant check
+            }
+            else {
+                return { status: 'unknown', exists: true };
+            }
+        }
+        catch (virshError) {
+            // virsh failed, try vagrant
+            logger_1.logger.debug(`virsh failed for ${vmName}, trying vagrant`);
+        }
+        // Fallback: vagrant status in VM directory
+        try {
+            const { stdout } = await execAsync(`cd ${vmPath} && vagrant status --machine-readable`, { timeout: 10000 });
+            logger_1.logger.debug(`Vagrant status for ${vmName}: ${stdout.substring(0, 200)}`);
+            // Check for "not created" state
+            if (stdout.includes('state,not_created')) {
+                return { status: 'not_created', exists: false };
+            }
+            // Parse machine-readable format: timestamp,provider,state,state-short,state-long
+            const stateLines = stdout.split('\n').filter((l) => l.includes(',state,') && !l.includes('state-human'));
+            if (stateLines.length > 0) {
+                const parts = stateLines[0].split(',');
+                if (parts.length >= 4) {
+                    const vagrantState = parts[3].trim();
+                    const isRunning = vagrantState === 'running';
+                    return {
+                        status: isRunning ? 'running' : vagrantState,
+                        exists: true
+                    };
+                }
+            }
+            return { status: 'unknown', exists: true };
+        }
+        catch (vagrantError) {
+            logger_1.logger.warn(`Vagrant status failed for ${vmName}:`, vagrantError.message);
+            return { status: 'error', exists: false };
+        }
+    }
     async updateVMStatusInDB() {
         const { exec } = require('child_process');
         const util = require('util');
         const execAsync = util.promisify(exec);
-        const fs = require('fs');
-        const path = require('path');
-        const vagrantDir = process.env.VAGRANT_DIR || '../simulations/fake';
+        const vagrantDir = process.env.VAGRANT_DIR || path.join(__dirname, '../../simulations/fake');
         if (!fs.existsSync(vagrantDir)) {
-            logger_1.logger.warn('Vagrant directory not found');
+            logger_1.logger.warn('Vagrant directory not found:', vagrantDir);
             return;
         }
         const entries = fs.readdirSync(vagrantDir, { withFileTypes: true });
@@ -79,116 +160,191 @@ class CRDTSyncService extends events_1.EventEmitter {
             .filter((entry) => entry.isDirectory())
             .map((entry) => entry.name)
             .filter((name) => name.startsWith('fake-') || name === 'gateway-vm');
+        logger_1.logger.info(`Checking ${vmDirs.length} VMs in ${vagrantDir}`);
         for (const vmName of vmDirs) {
             const vmPath = path.join(vagrantDir, vmName);
             // Skip if no Vagrantfile
             if (!fs.existsSync(path.join(vmPath, 'Vagrantfile'))) {
+                logger_1.logger.debug(`Skipping ${vmName}: no Vagrantfile`);
                 continue;
             }
             try {
-                // Get status with timeout
-                const { stdout: statusOutput } = await execAsync(`cd ${vmPath} && timeout 5 vagrant status --machine-readable 2>/dev/null || echo ""`, { timeout: 6000 });
-                const statusLine = statusOutput.split('\n').find((line) => line.includes(',state,'));
-                const vagrantStatus = statusLine ? statusLine.split(',')[3] : 'unknown';
-                const isRunning = vagrantStatus === 'running';
+                // Use reliable status detection
+                const { status, exists, ip: virshIp } = await this.getVMStatus(vmName, vmPath);
+                logger_1.logger.info(`VM ${vmName} status: ${status} (exists: ${exists})`);
                 const updateData = {
                     vmName,
                     hostname: vmName,
-                    status: isRunning ? 'running' : (vagrantStatus === 'unknown' ? 'unknown' : 'stopped'),
+                    status: status === 'not_created' ? 'stopped' : status, // Map not_created to stopped for frontend
                     lastSeen: new Date(),
                 };
-                // If running, get more details
-                if (isRunning) {
+                // Only collect detailed data if VM is running
+                if (status === 'running') {
                     try {
-                        // Get IP
-                        const { stdout: ipOutput } = await execAsync(`cd ${vmPath} && timeout 3 vagrant ssh -c "hostname -I | head -1" 2>/dev/null || echo ""`, { timeout: 4000 });
-                        updateData.ip = ipOutput.trim() || undefined;
-                        // Get CRDT stats
-                        const { stdout: statsOutput } = await execAsync(`cd ${vmPath} && timeout 3 vagrant ssh -c "sudo syslogd-helper stats 2>/dev/null || echo 'ERROR'" 2>/dev/null`, { timeout: 4000 });
-                        if (statsOutput.includes('Node:')) {
-                            const lines = statsOutput.split('\n');
-                            const attackers = parseInt(lines.find((l) => l.includes('Attackers:'))?.split(':')[1] || '0');
-                            const credentials = parseInt(lines.find((l) => l.includes('Credentials:'))?.split(':')[1] || '0');
-                            const sessions = parseInt(lines.find((l) => l.includes('Sessions:'))?.split(':')[1] || '0');
-                            const hash = lines.find((l) => l.includes('State hash:'))?.split(':')[1]?.trim() || '';
-                            updateData.crdtState = { attackers, credentials, sessions, hash };
+                        // Use virsh IP if available, otherwise try vagrant ssh
+                        let vmIp = virshIp;
+                        if (!vmIp) {
+                            try {
+                                const { stdout: ipOutput } = await execAsync(`cd ${vmPath} && vagrant ssh -c "hostname -I | awk '{print \\$1}'" 2>/dev/null`, { timeout: 8000 });
+                                vmIp = ipOutput.trim() || undefined;
+                            }
+                            catch (e) {
+                                // Ignore IP fetch errors
+                            }
+                        }
+                        updateData.ip = vmIp;
+                        // Get CRDT stats - UPDATED with improved parsing
+                        try {
+                            // Check if syslogd-helper exists and run it, otherwise return empty JSON
+                            const { stdout: statsOutput } = await execAsync(`cd ${vmPath} && vagrant ssh -c "if command -v syslogd-helper >/dev/null 2>&1; then sudo syslogd-helper stats 2>/dev/null; else echo '{}'; fi" 2>/dev/null`, { timeout: 8000 });
+                            // Try to parse as JSON first (syslogd-helper should output JSON)
+                            try {
+                                if (statsOutput && statsOutput.trim() && statsOutput.trim() !== '{}' && statsOutput.trim() !== 'NO_STATS') {
+                                    const stats = JSON.parse(statsOutput);
+                                    const attackers = Object.keys(stats.attackers || {}).length;
+                                    const credentials = Object.keys(stats.stolen_creds?.adds || {}).length;
+                                    const sessions = Object.keys(stats.active_sessions?.entries || {}).length;
+                                    const hash = stats.state_hash || '';
+                                    updateData.crdtState = { attackers, credentials, sessions, hash };
+                                    if (attackers > 0 || credentials > 0 || sessions > 0) {
+                                        logger_1.logger.info(`VM ${vmName} CRDT: ${attackers} attackers, ${credentials} creds, ${sessions} sessions`);
+                                    }
+                                }
+                                else {
+                                    updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+                                }
+                            }
+                            catch (parseError) {
+                                // If not JSON, try to parse the old text format
+                                if (statsOutput && statsOutput.includes('Attackers:')) {
+                                    const lines = statsOutput.split('\n');
+                                    const attackers = parseInt(lines.find((l) => l.includes('Attackers:'))?.split(':')[1]?.trim() || '0');
+                                    const credentials = parseInt(lines.find((l) => l.includes('Credentials:'))?.split(':')[1]?.trim() || '0');
+                                    const sessions = parseInt(lines.find((l) => l.includes('Sessions:'))?.split(':')[1]?.trim() || '0');
+                                    const hash = lines.find((l) => l.includes('State hash:'))?.split(':')[1]?.trim() || '';
+                                    updateData.crdtState = { attackers, credentials, sessions, hash };
+                                    logger_1.logger.info(`VM ${vmName} CRDT (legacy): ${attackers} attackers, ${credentials} creds`);
+                                }
+                                else {
+                                    updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+                                }
+                            }
+                        }
+                        catch (statsError) {
+                            logger_1.logger.warn(`Failed to get CRDT stats for ${vmName}:`, statsError);
+                            updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
                         }
                         // Get Docker containers
-                        const { stdout: dockerOutput } = await execAsync(`cd ${vmPath} && timeout 3 vagrant ssh -c "sudo docker ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}|{{.CreatedAt}}' 2>/dev/null || echo ''" 2>/dev/null`, { timeout: 4000 });
-                        if (dockerOutput.trim()) {
-                            updateData.dockerContainers = dockerOutput.split('\n')
-                                .filter((line) => line.includes('|'))
-                                .map((line) => {
-                                const [id, name, image, containerStatus, ports, created] = line.split('|');
-                                return {
-                                    id: id.substring(0, 12),
-                                    name,
-                                    image,
-                                    status: containerStatus.includes('Up') ? 'running' : 'exited',
-                                    ports: ports ? ports.split(', ') : [],
-                                    created
-                                };
-                            });
+                        try {
+                            const { stdout: dockerOutput } = await execAsync(`cd ${vmPath} && vagrant ssh -c "sudo docker ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' 2>/dev/null || echo ''" 2>/dev/null`, { timeout: 8000 });
+                            if (dockerOutput.trim()) {
+                                updateData.dockerContainers = dockerOutput.split('\n')
+                                    .filter((line) => line.includes('|'))
+                                    .map((line) => {
+                                    const parts = line.split('|');
+                                    return {
+                                        id: parts[0]?.substring(0, 12) || '',
+                                        name: parts[1] || '',
+                                        image: parts[2] || '',
+                                        status: parts[3]?.includes('Up') ? 'running' : 'exited',
+                                        ports: parts[4] ? parts[4].split(', ') : [],
+                                        created: ''
+                                    };
+                                });
+                            }
+                            else {
+                                updateData.dockerContainers = [];
+                            }
+                        }
+                        catch (dockerError) {
+                            updateData.dockerContainers = [];
                         }
                     }
                     catch (detailError) {
                         logger_1.logger.warn(`Failed to get details for ${vmName}:`, detailError);
                     }
                 }
+                else {
+                    // VM not running - clear dynamic data
+                    updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+                    updateData.dockerContainers = [];
+                    if (!updateData.ip)
+                        updateData.ip = undefined;
+                }
                 // Upsert to MongoDB
                 await models_2.VMStatus.findOneAndUpdate({ vmName }, updateData, { upsert: true, new: true });
                 logger_1.logger.info(`Updated VM status for ${vmName}: ${updateData.status}`);
             }
             catch (error) {
-                logger_1.logger.error(`Failed to update VM status for ${vmName}:`, error);
+                logger_1.logger.error(`Failed to update VM status for ${vmName}:`, error.message);
                 // Mark as error in DB
                 await models_2.VMStatus.findOneAndUpdate({ vmName }, {
                     vmName,
                     hostname: vmName,
                     status: 'error',
-                    lastSeen: new Date()
+                    lastSeen: new Date(),
+                    crdtState: { attackers: 0, credentials: 0, sessions: 0, hash: '' },
+                    dockerContainers: []
                 }, { upsert: true });
             }
         }
     }
-    stopSyncLoop() {
-        if (this.syncInterval) {
-            clearInterval(this.syncInterval);
-            this.syncInterval = undefined;
-        }
-    }
     async performSync() {
         this.isSyncing = true;
-        let newEventsCount = 0;
         let attackersFound = 0;
         try {
             const { exec } = require('child_process');
             const util = require('util');
             const execAsync = util.promisify(exec);
-            const vmDirs = fs.readdirSync(this.vagrantDir)
-                .filter(dir => fs.statSync(path.join(this.vagrantDir, dir)).isDirectory())
-                .filter(dir => dir.startsWith('fake-') || dir === 'gateway-vm');
-            for (const vm of vmDirs) {
+            // Use same VM list as check_vms.sh
+            const vmNames = [
+                'gateway-vm',
+                'fake-ftp-01', 'fake-jump-01', 'fake-rdp-01', 'fake-smb-01',
+                'fake-ssh-01', 'fake-web-01', 'fake-web-02', 'fake-web-03'
+            ];
+            for (const vm of vmNames) {
                 try {
                     const vmPath = path.join(this.vagrantDir, vm);
-                    const { stdout: statusOutput } = await execAsync(`cd ${vmPath} && vagrant status --machine-readable`, { timeout: 5000 });
-                    if (!statusOutput.includes('state-running,running')) {
+                    // Skip if directory doesn't exist
+                    if (!fs.existsSync(vmPath)) {
                         continue;
                     }
+                    // Check if VM is running using virsh with correct domain name (vm_default)
+                    let isRunning = false;
+                    try {
+                        const domainName = `${vm}_default`;
+                        const { stdout } = await execAsync(`virsh domstate ${domainName} 2>/dev/null || echo ""`, { timeout: 3000 });
+                        isRunning = stdout.trim().toLowerCase() === 'running';
+                        if (isRunning) {
+                            logger_1.logger.debug(`CRDT sync: ${vm} (${domainName}) is running`);
+                        }
+                    }
+                    catch (e) {
+                        // virsh failed, skip this VM for CRDT sync
+                        logger_1.logger.debug(`virsh check failed for ${vm}, skipping for CRDT sync`);
+                        continue;
+                    }
+                    if (!isRunning) {
+                        logger_1.logger.debug(`VM ${vm} not running, skipping CRDT sync`);
+                        continue;
+                    }
+                    // Get CRDT state from running VM
                     const { stdout } = await execAsync(`cd ${vmPath} && vagrant ssh -c "sudo cat /var/lib/.syscache 2>/dev/null || echo '{}'"`, { timeout: 10000 });
                     if (stdout && stdout.trim() !== '{}' && stdout.trim() !== '') {
                         const state = JSON.parse(stdout);
                         const beforeCount = Object.keys(state.attackers || {}).length;
-                        attackersFound += beforeCount;
-                        await this.processState(state, vm);
-                        logger_1.logger.info(`Processed state from ${vm}: ${beforeCount} attackers`);
+                        if (beforeCount > 0) {
+                            attackersFound += beforeCount;
+                            await this.processState(state, vm);
+                            logger_1.logger.info(`Processed state from ${vm}: ${beforeCount} attackers`);
+                        }
                     }
                 }
                 catch (error) {
                     logger_1.logger.warn(`Failed to sync with ${vm}:`, error.message);
                 }
             }
-            logger_1.logger.info(`Sync complete: ${attackersFound} attackers found across ${vmDirs.length} VMs`);
+            logger_1.logger.info(`CRDT sync complete: ${attackersFound} attackers found`);
             this.emit('syncComplete', { attackersCount: attackersFound, timestamp: new Date().toISOString() });
         }
         catch (error) {
@@ -202,10 +358,15 @@ class CRDTSyncService extends events_1.EventEmitter {
     async processState(state, sourceHost) {
         const nodeId = state.node_id || sourceHost;
         logger_1.logger.info(`Processing CRDT state from ${sourceHost}, node_id: ${nodeId}`);
-        logger_1.logger.info(`State contents: attackers=${Object.keys(state.attackers || {}).length}, creds=${state.stolen_creds?.adds ? Object.keys(state.stolen_creds.adds).length : 0}`);
+        const attackerCount = Object.keys(state.attackers || {}).length;
+        const credCount = state.stolen_creds?.adds ? Object.keys(state.stolen_creds.adds).length : 0;
+        logger_1.logger.info(`State contents: attackers=${attackerCount}, creds=${credCount}`);
         if (state.attackers) {
-            logger_1.logger.info(`Processing ${Object.keys(state.attackers).length} attackers from ${sourceHost}`);
             for (const [attackerIp, attackerState] of Object.entries(state.attackers)) {
+                if (attackerIp === 'unknown') {
+                    logger_1.logger.warn(`Skipping attacker with IP 'unknown' from ${sourceHost}`);
+                    continue;
+                }
                 logger_1.logger.info(`Processing attacker: ${attackerIp} from ${sourceHost}`);
                 await this.updateAttacker(attackerIp, attackerState, sourceHost);
             }
@@ -213,7 +374,7 @@ class CRDTSyncService extends events_1.EventEmitter {
         if (state.stolen_creds?.adds) {
             for (const [cred, tags] of Object.entries(state.stolen_creds.adds)) {
                 for (const [node, timestamp] of tags) {
-                    await this.addCredential(cred, nodeId, attackerIpFromTags(tags));
+                    await this.addCredential(cred, nodeId, this.extractAttackerIpFromTags(tags));
                 }
             }
         }
@@ -222,6 +383,20 @@ class CRDTSyncService extends events_1.EventEmitter {
                 await this.addSessionEvent(sessionId, host, node, ts);
             }
         }
+    }
+    /**
+     * Extract attacker IP from CRDT state
+     * Since tags contain (node_id, timestamp), we need to track attacker IP separately
+     * This implementation uses the attackerIp parameter passed from processState
+     */
+    extractAttackerIpFromTags(tags, attackerIp) {
+        // If attackerIp is provided directly, use it
+        if (attackerIp && attackerIp !== 'unknown') {
+            return attackerIp;
+        }
+        // Tags are [(node_id, timestamp), ...], not attacker IPs
+        // Return undefined if we can't determine the attacker IP
+        return undefined;
     }
     async updateAttacker(attackerIp, state, sourceHost) {
         const attackerId = `APT-${attackerIp.replace(/\./g, '-')}`;
@@ -237,7 +412,12 @@ class CRDTSyncService extends events_1.EventEmitter {
                 firstSeen: new Date(),
                 lastSeen: new Date(),
                 dwellTime: 0,
-                status: 'Active'
+                status: 'Active',
+                geolocation: {
+                    country: 'Unknown',
+                    city: 'Unknown',
+                    coordinates: [0, 0]
+                }
             });
             logger_1.logger.info(`Created new attacker: ${attackerId} from ${sourceHost}`);
         }
@@ -255,220 +435,328 @@ class CRDTSyncService extends events_1.EventEmitter {
             logger_1.logger.info(`Updated attacker: ${attackerId}, dwellTime: ${attacker.dwellTime}min, risk: ${attacker.riskLevel}`);
         }
         await attacker.save();
+        // Process visited decoys - create visit events
         if (state.visited_decoys?.elements) {
             for (const decoy of state.visited_decoys.elements) {
                 await this.addVisitEvent(attackerId, decoy, sourceHost);
             }
         }
+        // Process actions per decoy
         if (state.actions_per_decoy?.entries) {
-            for (const [decoy, [action, ts, node]] of Object.entries(state.actions_per_decoy.entries)) {
-                await this.addActionEvent(attackerId, decoy, action, ts, node);
+            for (const [decoyKey, actionData] of Object.entries(state.actions_per_decoy.entries)) {
+                // actionData format: [action, timestamp, node]
+                const action = actionData[0];
+                const ts = actionData[1];
+                const node = actionData[2];
+                await this.addActionEvent(attackerId, decoyKey, action, ts, node);
             }
         }
+        // Update privilege based on location
         if (state.location?.value) {
             attacker.currentPrivilege = this.inferPrivilege(state.location.value);
             await attacker.save();
         }
         this.emit('attackerUpdated', attacker);
     }
+    /**
+     * Create a visit event when attacker visits a decoy
+     */
     async addVisitEvent(attackerId, decoy, sourceHost) {
-        const eventId = `evt-${(0, uuid_1.v4)()}`;
-        const existing = await models_1.AttackEvent.findOne({
-            attackerId,
-            description: `Attacker visited ${decoy}`,
-            timestamp: { $gte: new Date(Date.now() - 60000) }
-        });
-        if (existing)
-            return;
-        const event = new models_1.AttackEvent({
-            eventId,
-            attackerId,
-            type: 'Discovery',
-            technique: 'T1083',
-            tactic: 'Discovery',
-            description: `Attacker visited ${decoy}`,
-            sourceHost: attackerId.split('-').slice(1).join('.'),
-            targetHost: decoy,
-            severity: 'Low',
-            status: 'Detected'
-        });
-        await event.save();
-        this.emit('newEvent', event);
-        await models_1.DecoyHost.findOneAndUpdate({ hostname: decoy }, {
-            $inc: { interactions: 1 },
-            $set: { lastInteraction: new Date() },
-            $addToSet: { attackerIds: attackerId }
-        }, { upsert: true });
-    }
-    async addActionEvent(attackerId, decoy, action, ts, node) {
-        const eventId = `evt-${(0, uuid_1.v4)()}`;
-        const actionLower = action.toLowerCase();
-        let type = 'Command Execution';
-        let technique = 'T1059';
-        let severity = 'Medium';
-        if (actionLower.includes('mimikatz') || actionLower.includes('credential')) {
-            type = 'Credential Theft';
-            technique = 'T1003';
-            severity = 'Critical';
-        }
-        else if (actionLower.includes('lateral') || actionLower.includes('ssh') || actionLower.includes('rdp')) {
-            type = 'Lateral Movement';
-            technique = 'T1021';
-            severity = 'High';
-        }
-        else if (actionLower.includes('exfil') || actionLower.includes('download')) {
-            type = 'Data Exfiltration';
-            technique = 'T1041';
-            severity = 'Critical';
-        }
-        else if (actionLower.includes('privilege') || actionLower.includes('sudo') || actionLower.includes('admin')) {
-            type = 'Privilege Escalation';
-            technique = 'T1078';
-            severity = 'High';
-        }
-        const event = new models_1.AttackEvent({
-            eventId,
-            timestamp: new Date(ts * 1000),
-            attackerId,
-            type,
-            technique,
-            tactic: this.getTacticFromType(type),
-            description: action,
-            sourceHost: node,
-            targetHost: decoy,
-            command: action,
-            severity,
-            status: 'Detected'
-        });
-        await event.save();
-        this.emit('newEvent', event);
-        if (type === 'Lateral Movement') {
-            await models_1.LateralMovement.create({
-                movementId: `mov-${(0, uuid_1.v4)()}`,
+        try {
+            const attacker = await models_1.Attacker.findOne({ attackerId });
+            if (!attacker) {
+                logger_1.logger.warn(`Attacker ${attackerId} not found for visit event`);
+                return;
+            }
+            // Check if we already have this visit event to avoid duplicates
+            const existingEvent = await models_1.AttackEvent.findOne({
                 attackerId,
-                sourceHost: node,
                 targetHost: decoy,
-                technique,
-                method: this.inferMethod(action),
-                successful: true
+                type: 'Discovery',
+                description: { $regex: `visited ${decoy}`, $options: 'i' }
             });
+            if (existingEvent) {
+                logger_1.logger.debug(`Visit event already exists for ${attackerId} -> ${decoy}`);
+                return;
+            }
+            const event = new models_1.AttackEvent({
+                eventId: `visit-${(0, uuid_1.v4)()}`,
+                timestamp: new Date(),
+                attackerId,
+                type: 'Discovery',
+                tactic: 'discovery',
+                tacticId: 'TA0007',
+                tacticName: 'Discovery',
+                technique: 'T1018',
+                techniqueName: 'Remote System Discovery',
+                isSubtechnique: false,
+                mitreConfidence: 0.8,
+                classificationMethod: 'pattern',
+                allMatchingTechniques: ['T1018'],
+                description: `Attacker visited decoy: ${decoy}`,
+                sourceHost: attacker.ipAddress,
+                targetHost: decoy,
+                severity: 'Low',
+                status: 'Detected'
+            });
+            await event.save();
+            this.emit('newEvent', event);
+            logger_1.logger.info(`Created visit event: ${attackerId} -> ${decoy}`);
+        }
+        catch (error) {
+            logger_1.logger.error(`Failed to create visit event for ${attackerId} -> ${decoy}:`, error);
         }
     }
+    /**
+     * Create an action event from attacker activity on a decoy
+     */
+    async addActionEvent(attackerId, decoy, action, ts, node) {
+        try {
+            const attacker = await models_1.Attacker.findOne({ attackerId });
+            if (!attacker) {
+                logger_1.logger.warn(`Attacker ${attackerId} not found for action event`);
+                return;
+            }
+            // Classify the action using MITRE service
+            const mitreService = new MitreAttackService_1.MitreAttackService();
+            const classification = await mitreService.classifyEvent(action);
+            // Map action to event type
+            let eventType = 'Discovery';
+            let severity = 'Low';
+            let technique = classification?.techniqueId || 'T1018';
+            let tactic = classification?.tactic || 'discovery';
+            let tacticId = classification?.tacticId || 'TA0007';
+            let tacticName = classification?.tacticName || 'Discovery';
+            let techniqueName = classification?.techniqueName || 'Remote System Discovery';
+            // Determine event type and severity based on action content
+            const actionLower = action.toLowerCase();
+            if (actionLower.includes('login') || actionLower.includes('auth')) {
+                eventType = 'Initial Access';
+                severity = 'Medium';
+                technique = classification?.techniqueId || 'T1078';
+                tactic = classification?.tactic || 'initial-access';
+                tacticId = classification?.tacticId || 'TA0001';
+                tacticName = classification?.tacticName || 'Initial Access';
+                techniqueName = classification?.techniqueName || 'Valid Accounts';
+            }
+            else if (actionLower.includes('privilege') || actionLower.includes('sudo') || actionLower.includes('admin')) {
+                eventType = 'Privilege Escalation';
+                severity = 'High';
+                technique = classification?.techniqueId || 'T1548';
+                tactic = classification?.tactic || 'privilege-escalation';
+                tacticId = classification?.tacticId || 'TA0004';
+                tacticName = classification?.tacticName || 'Privilege Escalation';
+                techniqueName = classification?.techniqueName || 'Abuse Elevation Control Mechanism';
+            }
+            else if (actionLower.includes('credential') || actionLower.includes('password') || actionLower.includes('mimikatz')) {
+                eventType = 'Credential Theft';
+                severity = 'Critical';
+                technique = classification?.techniqueId || 'T1003';
+                tactic = classification?.tactic || 'credential-access';
+                tacticId = classification?.tacticId || 'TA0006';
+                tacticName = classification?.tacticName || 'Credential Access';
+                techniqueName = classification?.techniqueName || 'OS Credential Dumping';
+            }
+            else if (actionLower.includes('lateral') || actionLower.includes('pivot') || actionLower.includes('ssh') || actionLower.includes('rdp')) {
+                eventType = 'Lateral Movement';
+                severity = 'High';
+                technique = classification?.techniqueId || 'T1021';
+                tactic = classification?.tactic || 'lateral-movement';
+                tacticId = classification?.tacticId || 'TA0008';
+                tacticName = classification?.tacticName || 'Lateral Movement';
+                techniqueName = classification?.techniqueName || 'Remote Services';
+            }
+            else if (actionLower.includes('exfil') || actionLower.includes('upload') || actionLower.includes('download')) {
+                eventType = 'Data Exfiltration';
+                severity = 'Critical';
+                technique = classification?.techniqueId || 'T1041';
+                tactic = classification?.tactic || 'exfiltration';
+                tacticId = classification?.tacticId || 'TA0010';
+                tacticName = classification?.tacticName || 'Exfiltration';
+                techniqueName = classification?.techniqueName || 'Exfiltration Over C2 Channel';
+            }
+            // Create the event
+            const event = new models_1.AttackEvent({
+                eventId: `action-${(0, uuid_1.v4)()}`,
+                timestamp: new Date(ts) || new Date(),
+                attackerId,
+                type: eventType,
+                tactic,
+                tacticId,
+                tacticName,
+                technique,
+                techniqueName,
+                isSubtechnique: classification?.isSubtechnique || false,
+                mitreConfidence: classification?.confidence || 0.7,
+                classificationMethod: classification?.method === 'fallback' ? 'unknown' : (classification?.method || 'pattern'),
+                allMatchingTechniques: classification?.allMatches || [technique],
+                commandPatternMatched: action,
+                description: action,
+                sourceHost: attacker.ipAddress,
+                targetHost: decoy,
+                severity,
+                status: 'Detected'
+            });
+            await event.save();
+            this.emit('newEvent', event);
+            logger_1.logger.info(`Created action event: ${attackerId} -> ${decoy}: ${action}`);
+        }
+        catch (error) {
+            logger_1.logger.error(`Failed to create action event for ${attackerId} -> ${decoy}:`, error);
+        }
+    }
+    /**
+     * Add a stolen credential to the database
+     */
     async addCredential(cred, sourceHost, attackerIp) {
-        const [username, password] = cred.split(':');
-        if (!username || !password)
-            return;
-        const credentialId = `cred-${(0, uuid_1.v4)()}`;
-        const attackerId = attackerIp ? `APT-${attackerIp.replace(/\./g, '-')}` : 'unknown';
-        const existing = await models_1.Credential.findOne({ username, password, attackerId });
-        if (existing) {
-            existing.usageCount++;
-            existing.lastUsed = new Date();
-            await existing.save();
-            return;
+        try {
+            // Parse credential string (format: "username:password")
+            const parts = cred.split(':');
+            if (parts.length < 2) {
+                logger_1.logger.warn(`Invalid credential format: ${cred}`);
+                return;
+            }
+            const username = parts[0];
+            const password = parts.slice(1).join(':'); // Handle passwords with colons
+            // Find the attacker by IP - search through active attackers
+            let attackerId;
+            if (attackerIp && attackerIp !== 'unknown') {
+                const attacker = await models_1.Attacker.findOne({ ipAddress: attackerIp });
+                if (attacker) {
+                    attackerId = attacker.attackerId;
+                }
+            }
+            // If no attacker found by IP, try to find the most recent active attacker from this host
+            if (!attackerId) {
+                const recentAttacker = await models_1.Attacker.findOne({
+                    entryPoint: sourceHost,
+                    status: 'Active'
+                }).sort({ lastSeen: -1 });
+                if (recentAttacker) {
+                    attackerId = recentAttacker.attackerId;
+                }
+            }
+            if (!attackerId) {
+                logger_1.logger.warn(`No attacker found for credential: ${cred} from ${sourceHost}`);
+                return;
+            }
+            // Check for duplicate credential
+            const existingCred = await models_1.Credential.findOne({
+                attackerId,
+                username,
+                password
+            });
+            if (existingCred) {
+                logger_1.logger.debug(`Credential already exists: ${username} from ${attackerId}`);
+                return;
+            }
+            // Calculate risk score based on username
+            let riskScore = 50;
+            if (username.includes('admin') || username.includes('root') || username.includes('administrator')) {
+                riskScore = 90;
+            }
+            else if (username.includes('service') || username.includes('svc') || username.includes('system')) {
+                riskScore = 75;
+            }
+            else if (username.includes('db') || username.includes('sql') || username.includes('database')) {
+                riskScore = 70;
+            }
+            const credential = new models_1.Credential({
+                credentialId: `cred-${(0, uuid_1.v4)()}`,
+                username,
+                password,
+                source: sourceHost,
+                attackerId,
+                decoyHost: sourceHost,
+                timestamp: new Date(),
+                usageCount: 0,
+                status: 'Stolen',
+                riskScore
+            });
+            await credential.save();
+            logger_1.logger.info(`Created credential: ${username} for attacker ${attackerId}`);
         }
-        await models_1.Credential.create({
-            credentialId,
-            username,
-            password,
-            source: sourceHost,
-            attackerId,
-            decoyHost: sourceHost,
-            status: 'Stolen',
-            riskScore: this.calculateCredentialRisk(username, password)
-        });
-        await models_1.AttackEvent.create({
-            eventId: `evt-${(0, uuid_1.v4)()}`,
-            attackerId,
-            type: 'Credential Theft',
-            technique: 'T1003',
-            tactic: 'Credential Access',
-            description: `Credential stolen: ${username}`,
-            sourceHost: attackerIp || 'unknown',
-            targetHost: sourceHost,
-            severity: 'Critical',
-            status: 'Detected'
-        });
+        catch (error) {
+            logger_1.logger.error(`Failed to create credential from ${sourceHost}:`, error);
+        }
     }
+    /**
+     * Create a session event for active attacker sessions
+     */
     async addSessionEvent(sessionId, host, node, ts) {
-        const eventId = `evt-${(0, uuid_1.v4)()}`;
-        await models_1.AttackEvent.findOneAndUpdate({ eventId }, {
-            eventId,
-            timestamp: new Date(ts * 1000),
-            attackerId: `APT-${node.replace(/\./g, '-')}`,
-            type: 'Initial Access',
-            technique: 'T1078',
-            tactic: 'Initial Access',
-            description: `Active session established on ${host}`,
-            sourceHost: node,
-            targetHost: host,
-            severity: 'High',
-            status: 'In Progress'
-        }, { upsert: true });
+        try {
+            // Find attacker by node/host
+            const attacker = await models_1.Attacker.findOne({
+                entryPoint: host,
+                status: 'Active'
+            }).sort({ lastSeen: -1 });
+            if (!attacker) {
+                logger_1.logger.debug(`No active attacker found for session on ${host}`);
+                return;
+            }
+            // Create a lateral movement event to represent the session
+            const movement = new models_1.LateralMovement({
+                movementId: `session-${(0, uuid_1.v4)()}`,
+                attackerId: attacker.attackerId,
+                timestamp: new Date(ts) || new Date(),
+                sourceHost: attacker.entryPoint,
+                targetHost: host,
+                technique: 'T1021',
+                method: 'SSH',
+                successful: true,
+                credentialsUsed: sessionId
+            });
+            await movement.save();
+            logger_1.logger.info(`Created session event: ${attacker.attackerId} -> ${host} (session: ${sessionId})`);
+        }
+        catch (error) {
+            logger_1.logger.error(`Failed to create session event for ${host}:`, error);
+        }
     }
+    /**
+     * Detect campaign name from CRDT state
+     */
     detectCampaign(state) {
-        const actions = Object.keys(state.actions_per_decoy?.entries || {});
-        const actionStr = JSON.stringify(actions).toLowerCase();
-        if (actionStr.includes('mimikatz') || actionStr.includes('lsass'))
-            return 'Shadow Hydra';
-        if (actionStr.includes('ransomware') || actionStr.includes('encrypt'))
-            return 'CryptoLock';
-        if (actionStr.includes('apt') || actionStr.includes('nation'))
-            return 'Silent Tiger';
+        // Analyze state for campaign indicators
+        if (state.actions_per_decoy?.entries) {
+            const actions = Object.values(state.actions_per_decoy.entries);
+            const actionStrings = actions.map(a => a[0]?.toLowerCase() || '');
+            if (actionStrings.some(a => a.includes('mimikatz') || a.includes('credential'))) {
+                return 'Credential Harvesting Campaign';
+            }
+            if (actionStrings.some(a => a.includes('lateral') || a.includes('pivot'))) {
+                return 'Lateral Movement Campaign';
+            }
+            if (actionStrings.some(a => a.includes('exfil') || a.includes('upload'))) {
+                return 'Data Exfiltration Campaign';
+            }
+        }
+        // Default based on visited decoys count
+        const visitedCount = state.visited_decoys?.elements?.length || 0;
+        if (visitedCount > 5) {
+            return 'Persistent Threat Campaign';
+        }
+        if (visitedCount > 2) {
+            return 'Reconnaissance Campaign';
+        }
         return 'Opportunistic';
     }
+    /**
+     * Infer privilege level from location/activity data
+     */
     inferPrivilege(location) {
-        if (location.includes('admin') || location.includes('root') || location.includes('system'))
+        const locationLower = location.toLowerCase();
+        if (locationLower.includes('root') || locationLower.includes('admin') || locationLower.includes('system')) {
             return 'Admin';
-        if (location.includes('db') || location.includes('sql'))
-            return 'DB Admin';
+        }
+        if (locationLower.includes('service') || locationLower.includes('svc')) {
+            return 'Service';
+        }
+        if (locationLower.includes('guest')) {
+            return 'Guest';
+        }
         return 'User';
-    }
-    inferMethod(action) {
-        const lower = action.toLowerCase();
-        if (lower.includes('ssh'))
-            return 'SSH';
-        if (lower.includes('rdp'))
-            return 'RDP';
-        if (lower.includes('smb'))
-            return 'SMB';
-        if (lower.includes('winrm'))
-            return 'WinRM';
-        if (lower.includes('wmi'))
-            return 'WMI';
-        if (lower.includes('psexec'))
-            return 'PSExec';
-        return 'Other';
-    }
-    getTacticFromType(type) {
-        const tacticMap = {
-            'Initial Access': 'Initial Access',
-            'Credential Theft': 'Credential Access',
-            'Lateral Movement': 'Lateral Movement',
-            'Command Execution': 'Execution',
-            'Data Exfiltration': 'Exfiltration',
-            'Privilege Escalation': 'Privilege Escalation',
-            'Discovery': 'Discovery',
-            'Persistence': 'Persistence',
-            'Defense Evasion': 'Defense Evasion'
-        };
-        return tacticMap[type] || 'Unknown';
-    }
-    calculateCredentialRisk(username, password) {
-        let score = 50;
-        if (username.includes('admin'))
-            score += 20;
-        if (username.includes('root'))
-            score += 25;
-        if (password.length < 8)
-            score += 15;
-        if (password.toLowerCase().includes('password'))
-            score += 10;
-        return Math.min(score, 100);
     }
 }
 exports.CRDTSyncService = CRDTSyncService;
-function attackerIpFromTags(tags) {
-    return undefined;
-}
 //# sourceMappingURL=CRDTSyncService.js.map

@@ -53,20 +53,35 @@ export async function mapToDashboardData(dbAttacker: any): Promise<any> {
   const attackerId = dbAttacker.attackerId;
   
   // Query REAL data from MongoDB
-  const [events, credentials, movements, decoys] = await Promise.all([
+  const [
+    events,
+    credentials,
+    movements,
+    decoys,
+    realAssetsCount,
+    activeAttackers
+  ] = await Promise.all([
     AttackEvent.find({ attackerId }).sort({ timestamp: -1 }).limit(10).lean(),
     Credential.find({ attackerId }).sort({ timestamp: -1 }).limit(5).lean(),
     LateralMovement.find({ attackerId }).sort({ timestamp: -1 }).limit(5).lean(),
     DecoyHost.find({ attackerIds: attackerId }).lean(),
+
+    // Real production assets
+    DecoyHost.countDocuments({
+      segment: { $in: ['corp', 'production', 'internal'] }
+    }),
+
+    // Active attackers count (instead of separate await later)
+    getActiveAttackerCount()
   ]);
 
   return {
     overview: {
-      activeAttackers: await getActiveAttackerCount(),
+      activeAttackers,
       deceptionEngagement: calculateEngagement(dbAttacker, events),
       dwellTimeGained: formatDwellTime(dbAttacker.dwellTime),
-      realAssetsProtected: 15,
-      zeroFalsePositives: events.filter((e: any) => e.status === 'Blocked').length === 0,
+      realAssetsProtected: realAssetsCount,
+      zeroFalsePositives: events.some((e: any) => e.status === 'False Positive') === false,
       riskLevel: dbAttacker.riskLevel,
       activeCampaign: dbAttacker.campaign,
     },
@@ -77,6 +92,7 @@ export async function mapToDashboardData(dbAttacker: any): Promise<any> {
       lastSeenAt: dbAttacker.lastSeen,
     },
     timeline: events.length > 0 ? events.map((e: any) => ({
+      eventId: e.eventId || e._id?.toString(),
       time: new Date(e.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       label: e.type,
       severity: mapSeverity(e.severity),
@@ -183,34 +199,71 @@ function createDefaultTimeline(attacker: any): any[] {
 }
 
 function generateMitreFromEvents(events: any[]): any {
-  const tactics = ["Initial Access", "Execution", "Persistence", "Privilege Escalation", "Defense Evasion", "Credential Access"];
-  
+  // Use real 14 tactics from MITRE
+  const tactics = [
+    'Reconnaissance', 'Resource Development', 'Initial Access', 'Execution',
+    'Persistence', 'Privilege Escalation', 'Defense Evasion', 'Credential Access',
+    'Discovery', 'Lateral Movement', 'Collection', 'Command and Control',
+    'Exfiltration', 'Impact'
+  ];
+
   if (events.length === 0) {
     return {
       tactics,
-      matrix: Array(6).fill(Array(5).fill(0)),
+      matrix: Array(14).fill(Array(5).fill(0)),
     };
   }
 
-  const matrix: number[][] = [];
-  for (let i = 0; i < tactics.length; i++) {
-    const row: number[] = [];
-    for (let j = 0; j < 5; j++) {
-      row.push(0);
-    }
-    matrix.push(row);
-  }
-
-  // Fill matrix based on real events
+  // Build matrix from real MITRE data in events
+  const matrix: number[][] = tactics.map(() => Array(5).fill(0));
+  
+  // Track technique counts per tactic
+  const tacticTechCounts: Record<string, Map<string, number>> = {};
+  
   events.forEach((event: any) => {
-    const tacticIndex = tactics.indexOf(event.tactic);
+    // Use the new MITRE fields if available, fallback to legacy
+    const tacticName = event.tacticName || event.tactic || 'Unknown';
+    const techniqueId = event.technique || 'TXXXX';
+    
+    // Map tactic name to index
+    const tacticIndex = tactics.findIndex(t => 
+      t.toLowerCase().replace(/\s+/g, '-') === tacticName.toLowerCase().replace(/\s+/g, '-') ||
+      t === tacticName
+    );
+    
     if (tacticIndex >= 0) {
-      const row = Math.floor(Math.random() * 5); // Distribute across rows
+      // Track unique techniques per tactic
+      if (!tacticTechCounts[tacticIndex]) {
+        tacticTechCounts[tacticIndex] = new Map();
+      }
+      const currentCount = tacticTechCounts[tacticIndex].get(techniqueId) || 0;
+      tacticTechCounts[tacticIndex].set(techniqueId, currentCount + 1);
+      
+      // Fill matrix based on confidence/severity
+      const severityValue = event.mitreConfidence || 
+        (event.severity === 'Critical' ? 0.9 : 
+         event.severity === 'High' ? 0.7 : 
+         event.severity === 'Medium' ? 0.5 : 0.3);
+      
+      const row = Math.min(4, Math.floor(severityValue * 5));
       matrix[tacticIndex][row] = Math.min(3, (matrix[tacticIndex][row] || 0) + 1);
     }
   });
 
-  return { tactics, matrix };
+  // Add metadata about technique diversity
+  const techniqueDiversity = Object.entries(tacticTechCounts).map(([tacticIdx, techniques]) => ({
+    tactic: tactics[parseInt(tacticIdx)],
+    uniqueTechniques: techniques.size,
+    topTechnique: Array.from(techniques.entries()).sort((a, b) => b[1] - a[1])[0]?.[0]
+  }));
+
+  return { 
+    tactics, 
+    matrix,
+    techniqueDiversity,
+    totalEvents: events.length,
+    classifiedEvents: events.filter((e: any) => e.technique && e.technique !== 'TXXXX').length
+  };
 }
 
 function generateMovementFromData(movements: any[], decoys: any[]): any {
@@ -249,28 +302,68 @@ function createDefaultCommands(): any[] {
 function analyzeBehaviors(events: any[], attacker: any): any {
   const behaviors = [];
   
-  const hasCredentialTheft = events.some((e: any) => e.type === 'Credential Theft');
-  const hasLateralMovement = events.some((e: any) => e.type === 'Lateral Movement');
-  const hasPrivilegeEscalation = events.some((e: any) => e.type === 'Privilege Escalation');
-  const hasDataExfiltration = events.some((e: any) => e.type === 'Data Exfiltration');
+  // Use real MITRE tactic classifications
+  const tacticCounts: Record<string, number> = {};
+  events.forEach((e: any) => {
+    const tactic = e.tactic || 'unknown';
+    tacticCounts[tactic] = (tacticCounts[tactic] || 0) + 1;
+  });
 
-  if (hasCredentialTheft) behaviors.push({ label: "Credential Dumping", kind: "destructive" });
-  if (hasLateralMovement) behaviors.push({ label: "Lateral Movement", kind: "destructive" });
-  if (hasPrivilegeEscalation) behaviors.push({ label: "Privilege Escalation", kind: "chart3" });
-  if (hasDataExfiltration) behaviors.push({ label: "Data Exfiltration", kind: "destructive" });
+  // Map tactics to behavior labels
+  if (tacticCounts['credential-access'] || tacticCounts['Credential Access']) {
+    behaviors.push({ label: "Credential Dumping", kind: "destructive" });
+  }
+  if (tacticCounts['lateral-movement'] || tacticCounts['Lateral Movement']) {
+    behaviors.push({ label: "Lateral Movement", kind: "destructive" });
+  }
+  if (tacticCounts['privilege-escalation'] || tacticCounts['Privilege Escalation']) {
+    behaviors.push({ label: "Privilege Escalation", kind: "chart3" });
+  }
+  if (tacticCounts['defense-evasion'] || tacticCounts['Defense Evasion']) {
+    behaviors.push({ label: "Defense Evasion", kind: "destructive" });
+  }
+  if (tacticCounts['command-and-control'] || tacticCounts['Command and Control']) {
+    behaviors.push({ label: "Command & Control", kind: "chart3" });
+  }
+  if (tacticCounts['discovery'] || tacticCounts['Discovery']) {
+    behaviors.push({ label: "Discovery", kind: "chart3" });
+  }
+  if (tacticCounts['exfiltration'] || tacticCounts['Exfiltration']) {
+    behaviors.push({ label: "Data Exfiltration", kind: "destructive" });
+  }
+  
+  // Fallback to legacy type checking if no MITRE data
+  if (behaviors.length === 0) {
+    const hasCredentialTheft = events.some((e: any) => e.type === 'Credential Theft');
+    const hasLateralMovement = events.some((e: any) => e.type === 'Lateral Movement');
+    const hasPrivilegeEscalation = events.some((e: any) => e.type === 'Privilege Escalation');
+    
+    if (hasCredentialTheft) behaviors.push({ label: "Credential Dumping", kind: "destructive" });
+    if (hasLateralMovement) behaviors.push({ label: "Lateral Movement", kind: "destructive" });
+    if (hasPrivilegeEscalation) behaviors.push({ label: "Privilege Escalation", kind: "chart3" });
+  }
   
   if (behaviors.length === 0) {
     behaviors.push({ label: "Reconnaissance", kind: "chart3" });
   }
 
-  let threatPct = 50;
-  if (attacker.riskLevel === "Critical") threatPct = 90;
-  else if (attacker.riskLevel === "High") threatPct = 75;
-  else if (attacker.riskLevel === "Medium") threatPct = 50;
+  // Calculate threat confidence based on MITRE confidence scores
+  const avgConfidence = events.length > 0
+    ? events.reduce((sum: number, e: any) => sum + (e.mitreConfidence || 0), 0) / events.length
+    : 0.5;
 
-  return { behaviors, threatConfidencePct: threatPct };
+  let threatPct = Math.round(avgConfidence * 100);
+  if (attacker.riskLevel === "Critical") threatPct = Math.max(threatPct, 90);
+  else if (attacker.riskLevel === "High") threatPct = Math.max(threatPct, 75);
+  else if (attacker.riskLevel === "Medium") threatPct = Math.max(threatPct, 50);
+
+  return { 
+    behaviors, 
+    threatConfidencePct: threatPct,
+    avgMitreConfidence: Math.round(avgConfidence * 100) / 100,
+    tacticsObserved: Object.keys(tacticCounts).length
+  };
 }
-
 function generateSummaryFromEvents(events: any[]): any {
   const types = events.reduce((acc: any, e: any) => {
     acc[e.type] = (acc[e.type] || 0) + 1;
@@ -294,11 +387,31 @@ function generateSummaryFromEvents(events: any[]): any {
 }
 
 function generateActivityChart(events: any[]): any[] {
-  // Group events by day
-  const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
-  const counts = days.map(() => Math.floor(Math.random() * 20) + 5);
-  
-  return days.map((name, idx) => ({ name, value: counts[idx] }));
+  const result: { name: string; value: number }[] = [];
+
+  const now = new Date();
+
+  // Create last 7 days (oldest → newest)
+  for (let i = 6; i >= 0; i--) {
+    const dayStart = new Date(now);
+    dayStart.setDate(now.getDate() - i);
+    dayStart.setHours(0, 0, 0, 0);
+
+    const dayEnd = new Date(dayStart);
+    dayEnd.setHours(23, 59, 59, 999);
+
+    const count = events.filter((e: any) => {
+      const ts = new Date(e.timestamp);
+      return ts >= dayStart && ts <= dayEnd;
+    }).length;
+
+    result.push({
+      name: dayStart.toLocaleDateString('en-US', { weekday: 'short' }),
+      value: count,
+    });
+  }
+
+  return result;
 }
 
 function generateCredentialUsage(credentials: any[]): any {
