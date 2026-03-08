@@ -64,7 +64,38 @@ function ContainerStatus({ containers }: { containers?: VMStatusType['dockerCont
   )
 }
 
+function inferVmRole(vmName: string): string {
+  const lower = vmName.toLowerCase()
+  if (lower.includes('-web-')) return "web"
+  if (lower.includes('-auth-')) return "auth"
+  if (lower.includes('-db-') || lower.includes('database')) return "db"
+  if (lower.includes('-payments-')) return "payments"
+  if (lower.includes('-api-')) return "api"
+  if (lower.includes('-worker-')) return "worker"
+  if (lower.includes('-cache-') || lower.includes('redis')) return "cache"
+  if (lower.includes('-ehr-')) return "ehr"
+  if (lower.includes('-backup-')) return "backup"
+  return "vm"
+}
+
+function roleIcon(role: string): string {
+  const icons: Record<string, string> = {
+    web: "🖥",
+    db: "🗄",
+    auth: "🔐",
+    payments: "💳",
+    api: "🧩",
+    worker: "⚙️",
+    cache: "🧠",
+    ehr: "🩺",
+    backup: "🧷",
+    vm: "🖧",
+  }
+  return icons[role] || icons.vm
+}
+
 function VMStatusCard({ vm }: { vm: VMStatusType }) {
+  const vmRole = inferVmRole(vm.name)
   return (
     <Card className={cn(
       "border transition-colors",
@@ -78,7 +109,11 @@ function VMStatusCard({ vm }: { vm: VMStatusType }) {
               vm.status === 'running' ? "text-primary" : "text-muted-foreground"
             )} />
             <div className="min-w-0">
-              <h4 className="font-medium text-sm truncate">{vm.name}</h4>
+              <h4 className="font-medium text-sm truncate flex items-center gap-1">
+                <span>{roleIcon(vmRole)}</span>
+                <span>{vm.name}</span>
+              </h4>
+              <p className="text-[10px] uppercase tracking-wide text-muted-foreground">{vmRole}</p>
               {vm.ip && <p className="text-xs text-muted-foreground font-mono">{vm.ip}</p>}
             </div>
           </div>

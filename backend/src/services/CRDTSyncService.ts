@@ -11,6 +11,11 @@ import { MitreAttackService } from './MitreAttackService';
 export class CRDTSyncService extends EventEmitter {
   private syncInterval?: NodeJS.Timeout;
   private vmUpdateInterval?: NodeJS.Timeout;
+import CompanyBlueprintModel from '../models/CompanyBlueprint';
+
+export class CRDTSyncService extends EventEmitter {
+  private syncInterval?: NodeJS.Timeout;
+  private vmStatusInterval?: NodeJS.Timeout;
   private vagrantDir: string;
   private isSyncing: boolean = false;
 
@@ -28,10 +33,10 @@ export class CRDTSyncService extends EventEmitter {
       }
     }, intervalMs);
   
-    // VM status updates every 30 seconds
-    this.vmUpdateInterval = setInterval(() => {
+    // Reconciliation loop: refresh VM status every 10 seconds.
+    this.vmStatusInterval = setInterval(() => {
       this.updateVMStatusInDB().catch(err => logger.error('VM status update error:', err));
-    }, 30000);
+    }, 10000);
   
     // Initial updates
     this.updateVMStatusInDB().catch(err => logger.error('Initial VM status error:', err));
@@ -56,6 +61,13 @@ export class CRDTSyncService extends EventEmitter {
     exists: boolean;
     ip?: string;
   }> {
+  // Converted to a proper class method
+  private async updateVMStatusInDB() {
+    if (await this.isDecoyApplyInProgress()) {
+      logger.info('Skipping VM status refresh while decoy apply is in progress');
+      return;
+    }
+
     const { exec } = require('child_process');
     const util = require('util');
     const execAsync = util.promisify(exec);
@@ -124,6 +136,20 @@ export class CRDTSyncService extends EventEmitter {
       const stateLines = stdout.split('\n').filter((l: string) => 
         l.includes(',state,') && !l.includes('state-human')
       );
+    const entries = fs.readdirSync(vagrantDir, { withFileTypes: true });
+    const vmDirs = entries
+      .filter((entry: any) => entry.isDirectory())
+      .map((entry: any) => entry.name)
+      .filter((name: string) => fs.existsSync(path.join(vagrantDir, name, 'Vagrantfile')));
+
+    if (vmDirs.length === 0) {
+      await VMStatus.deleteMany({});
+    } else {
+      await VMStatus.deleteMany({ vmName: { $nin: vmDirs } });
+    }
+
+    for (const vmName of vmDirs) {
+      const vmPath = path.join(vagrantDir, vmName);
       
       if (stateLines.length > 0) {
         const parts = stateLines[0].split(',');
@@ -344,10 +370,19 @@ private async updateVMStatusInDB() {
         { upsert: true }
       );
     }
+    if (this.vmStatusInterval) {
+      clearInterval(this.vmStatusInterval);
+      this.vmStatusInterval = undefined;
+    }
   }
 }
 
   async performSync() {
+    if (await this.isDecoyApplyInProgress()) {
+      logger.info('Skipping CRDT sync while decoy apply is in progress');
+      return;
+    }
+
     this.isSyncing = true;
     let attackersFound = 0;
     
@@ -362,6 +397,9 @@ private async updateVMStatusInDB() {
         'fake-ftp-01', 'fake-jump-01', 'fake-rdp-01', 'fake-smb-01',
         'fake-ssh-01', 'fake-web-01', 'fake-web-02', 'fake-web-03'
       ];
+      const vmDirs = fs.readdirSync(this.vagrantDir)
+        .filter(dir => fs.statSync(path.join(this.vagrantDir, dir)).isDirectory())
+        .filter(dir => fs.existsSync(path.join(this.vagrantDir, dir, 'Vagrantfile')));
 
       for (const vm of vmNames) {
         try {
@@ -423,6 +461,18 @@ private async updateVMStatusInDB() {
       this.emit('syncError', error);
     } finally {
       this.isSyncing = false;
+    }
+  }
+
+  private async isDecoyApplyInProgress(): Promise<boolean> {
+    try {
+      const active = await CompanyBlueprintModel.exists({ 'deployment.status': 'applying' });
+      return Boolean(active);
+    } catch (error) {
+      logger.warn('Failed to query decoy apply status, continuing normal sync loop', {
+        error: error instanceof Error ? error.message : String(error)
+      });
+      return false;
     }
   }
 
@@ -616,6 +666,42 @@ private async updateVMStatusInDB() {
     } catch (error) {
       logger.error(`Failed to create visit event for ${attackerId} -> ${decoy}:`, error);
     }
+    const eventId = `evt-${uuidv4()}`;
+    
+    const existing = await AttackEvent.findOne({ 
+      attackerId, 
+      description: `Attacker visited ${decoy}`,
+      timestamp: { $gte: new Date(Date.now() - 60000) }
+    });
+    
+    if (existing) return;
+
+    const event = new AttackEvent({
+      eventId,
+      attackerId,
+      stage: 'RECON',
+      type: 'Discovery',
+      technique: 'T1083',
+      tactic: 'Discovery',
+      description: `Attacker visited ${decoy}`,
+      sourceHost: attackerId.split('-').slice(1).join('.'),
+      targetHost: decoy,
+      severity: 'Low',
+      status: 'Detected'
+    });
+
+    await event.save();
+    this.emit('newEvent', event);
+
+    await DecoyHost.findOneAndUpdate(
+      { hostname: decoy },
+      { 
+        $inc: { interactions: 1 },
+        $set: { lastInteraction: new Date() },
+        $addToSet: { attackerIds: attackerId }
+      },
+      { upsert: true }
+    );
   }
 
   /**
@@ -632,6 +718,28 @@ private async updateVMStatusInDB() {
       // Check if we already have this action event to avoid duplicates
       // Same attacker, same action, same target within last 24 hours
       const existingEvent = await AttackEvent.findOne({
+    const event = new AttackEvent({
+      eventId,
+      timestamp: new Date(ts * 1000),
+      attackerId,
+      stage: this.getStageFromType(type, action),
+      type,
+      technique,
+      tactic: this.getTacticFromType(type),
+      description: action,
+      sourceHost: node,
+      targetHost: decoy,
+      command: action,
+      severity,
+      status: 'Detected'
+    });
+
+    await event.save();
+    this.emit('newEvent', event);
+
+    if (type === 'Lateral Movement') {
+      await LateralMovement.create({
+        movementId: `mov-${uuidv4()}`,
         attackerId,
         targetHost: decoy,
         commandPatternMatched: action,
@@ -812,6 +920,30 @@ private async updateVMStatusInDB() {
     } catch (error) {
       logger.error(`Failed to create credential from ${sourceHost}:`, error);
     }
+    await Credential.create({
+      credentialId,
+      username,
+      password,
+      source: sourceHost,
+      attackerId,
+      decoyHost: sourceHost,
+      status: 'Stolen',
+      riskScore: this.calculateCredentialRisk(username, password)
+    });
+
+    await AttackEvent.create({
+      eventId: `evt-${uuidv4()}`,
+      attackerId,
+      stage: 'CREDENTIAL_ACCESS',
+      type: 'Credential Theft',
+      technique: 'T1003',
+      tactic: 'Credential Access',
+      description: `Credential stolen: ${username}`,
+      sourceHost: attackerIp || 'unknown',
+      targetHost: sourceHost,
+      severity: 'Critical',
+      status: 'Detected'
+    });
   }
 
   /**
@@ -836,6 +968,20 @@ private async updateVMStatusInDB() {
         attackerId: attacker.attackerId,
         timestamp: new Date(ts) || new Date(),
         sourceHost: attacker.entryPoint,
+    const eventId = `evt-${uuidv4()}`;
+    
+    await AttackEvent.findOneAndUpdate(
+      { eventId },
+      {
+        eventId,
+        timestamp: new Date(ts * 1000),
+        attackerId: `APT-${node.replace(/\./g, '-')}`,
+        stage: 'INITIAL_ACCESS',
+        type: 'Initial Access',
+        technique: 'T1078',
+        tactic: 'Initial Access',
+        description: `Active session established on ${host}`,
+        sourceHost: node,
         targetHost: host,
         technique: 'T1021',
         method: 'SSH',
@@ -900,4 +1046,31 @@ private async updateVMStatusInDB() {
 
     return 'User';
   }
+}
+  private getStageFromType(type: string, action = ''): string {
+    const lowerType = type.toLowerCase();
+    const lowerAction = action.toLowerCase();
+
+    if (lowerType.includes('discovery') || lowerAction.includes('nmap') || lowerAction.includes('recon')) return 'RECON';
+    if (lowerType.includes('initial access')) return 'INITIAL_ACCESS';
+    if (lowerType.includes('credential')) return 'CREDENTIAL_ACCESS';
+    if (lowerType.includes('lateral')) return 'LATERAL_MOVEMENT';
+    if (lowerType.includes('privilege')) return 'PRIVILEGE_ESCALATION';
+    if (lowerType.includes('command')) return 'EXECUTION';
+    if (lowerType.includes('exfiltration')) return 'EXFILTRATION';
+    return 'OTHER';
+  }
+
+  private calculateCredentialRisk(username: string, password: string): number {
+    let score = 50;
+    if (username.includes('admin')) score += 20;
+    if (username.includes('root')) score += 25;
+    if (password.length < 8) score += 15;
+    if (password.toLowerCase().includes('password')) score += 10;
+    return Math.min(score, 100);
+  }
+}
+
+function attackerIpFromTags(tags: [string, number][]): string | undefined {
+  return undefined;
 }

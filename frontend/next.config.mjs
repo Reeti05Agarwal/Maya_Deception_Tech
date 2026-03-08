@@ -7,6 +7,10 @@ const nextConfig = {
         destination: 'http://localhost:3001/api/:path*',
       },
       {
+        source: '/health',
+        destination: 'http://localhost:3001/health',
+      },
+      {
         source: '/ws',
         destination: 'http://localhost:3001/ws',
       },

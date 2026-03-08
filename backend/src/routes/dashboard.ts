@@ -75,8 +75,12 @@ router.get('/stats', asyncHandler(async (req: Request, res: Response) => {
 }));
 
 router.get('/timeline', asyncHandler(async (req: Request, res: Response) => {
-  const { attackerId, hours = 24 } = req.query;
-  const timeline = await dashboardService.getAttackTimeline(attackerId as string | undefined, parseInt(hours as string));
+  const { attackerId, hours = 24, limit = 100 } = req.query;
+  const timeline = await dashboardService.getAttackTimeline(
+    attackerId as string | undefined,
+    parseInt(hours as string, 10),
+    parseInt(limit as string, 10)
+  );
   res.json({ success: true, data: timeline, count: timeline.length, timestamp: new Date().toISOString() });
 }));
 
@@ -101,6 +105,11 @@ router.get('/commands', asyncHandler(async (req: Request, res: Response) => {
 router.get('/metrics', asyncHandler(async (req: Request, res: Response) => {
   const metrics = await dashboardService.getDeceptionMetrics();
   res.json({ success: true, data: metrics, timestamp: new Date().toISOString() });
+}));
+
+router.get('/security-posture', asyncHandler(async (_req: Request, res: Response) => {
+  const posture = await dashboardService.getSecurityPostureScore();
+  res.json({ success: true, data: posture, timestamp: new Date().toISOString() });
 }));
 
 router.get('/behavior', asyncHandler(async (req: Request, res: Response) => {

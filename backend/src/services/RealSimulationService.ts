@@ -77,6 +77,11 @@ export class RealSimulationService extends EventEmitter {
     }
 
     logger.info(`Scanning for VMs in: ${this.vagrantDir}`);
+    const entries = fs.readdirSync(this.vagrantDir, { withFileTypes: true });
+    const vmDirs = entries
+      .filter(entry => entry.isDirectory())
+      .map(entry => entry.name)
+      .filter(name => fs.existsSync(path.join(this.vagrantDir, name, 'Vagrantfile')));
 
     // List of VMs to check (from check_vms.sh)
     const vmNames = [
@@ -313,6 +318,7 @@ export class RealSimulationService extends EventEmitter {
           eventId: `evt-${uuidv4()}`,
           timestamp: new Date(),
           attackerId,
+          stage: 'INITIAL_ACCESS',
           type: 'Initial Access',
           // NEW MITRE FIELDS
           tactic: classification?.tactic || 'initial-access',
@@ -367,6 +373,7 @@ export class RealSimulationService extends EventEmitter {
         eventId: `evt-${uuidv4()}`,
         timestamp: new Date(),
         attackerId,
+        stage: 'INITIAL_ACCESS',
         type: 'Initial Access',
         tactic: successClassification?.tactic || 'initial-access',
         tacticId: successClassification?.tacticId || 'TA0001',
@@ -501,6 +508,7 @@ export class RealSimulationService extends EventEmitter {
       const initialEvent = new AttackEvent({
         eventId: `evt-${uuidv4()}`,
         attackerId,
+        stage: 'INITIAL_ACCESS',
         type: 'Initial Access',
         tactic: initialClassification?.tactic || 'initial-access',
         tacticId: initialClassification?.tacticId || 'TA0001',
@@ -549,6 +557,7 @@ export class RealSimulationService extends EventEmitter {
         const moveEvent = new AttackEvent({
           eventId: `evt-${uuidv4()}`,
           attackerId,
+          stage: 'LATERAL_MOVEMENT',
           type: 'Lateral Movement',
           tactic: moveClassification?.tactic || 'lateral-movement',
           tacticId: moveClassification?.tacticId || 'TA0008',
@@ -659,6 +668,7 @@ export class RealSimulationService extends EventEmitter {
       const dumpEvent = new AttackEvent({
         eventId: `evt-${uuidv4()}`,
         attackerId,
+        stage: 'CREDENTIAL_ACCESS',
         type: 'Credential Theft',
         tactic: dumpClassification?.tactic || 'credential-access',
         tacticId: dumpClassification?.tacticId || 'TA0006',
@@ -710,6 +720,7 @@ export class RealSimulationService extends EventEmitter {
         const credEvent = new AttackEvent({
           eventId: `evt-${uuidv4()}`,
           attackerId,
+          stage: 'CREDENTIAL_ACCESS',
           type: 'Credential Theft',
           tactic: credClassification?.tactic || 'credential-access',
           tacticId: credClassification?.tacticId || 'TA0006',

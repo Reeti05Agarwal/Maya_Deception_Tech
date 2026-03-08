@@ -5,8 +5,15 @@ export interface IAttackEvent extends Document {
   eventId: string;
   timestamp: Date;
   attackerId: string;
-  
-  // Event categorization (legacy fields - keep for backward compatibility)
+  stage?:
+    | 'RECON'
+    | 'INITIAL_ACCESS'
+    | 'CREDENTIAL_ACCESS'
+    | 'LATERAL_MOVEMENT'
+    | 'PRIVILEGE_ESCALATION'
+    | 'EXECUTION'
+    | 'EXFILTRATION'
+    | 'OTHER';
   type: 'Initial Access' | 'Credential Theft' | 'Lateral Movement' | 'Command Execution' | 
         'Data Exfiltration' | 'Privilege Escalation' | 'Discovery' | 'Persistence' | 'Defense Evasion';
   description: string;
@@ -55,8 +62,10 @@ const AttackEventSchema: Schema = new Schema({
   eventId: { type: String, required: true, unique: true, index: true },
   timestamp: { type: Date, default: Date.now, index: true },
   attackerId: { type: String, required: true, ref: 'Attacker', index: true },
-  
-  // Event categorization (legacy - maintain backward compatibility)
+  stage: {
+    type: String,
+    enum: ['RECON', 'INITIAL_ACCESS', 'CREDENTIAL_ACCESS', 'LATERAL_MOVEMENT', 'PRIVILEGE_ESCALATION', 'EXECUTION', 'EXFILTRATION', 'OTHER']
+  },
   type: { 
     type: String, 
     enum: ['Initial Access', 'Credential Theft', 'Lateral Movement', 'Command Execution', 

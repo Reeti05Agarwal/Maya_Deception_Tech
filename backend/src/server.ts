@@ -18,6 +18,11 @@ import simulationRoutes from './routes/simulation';
 import VMStatus from './models/VMStatus'; 
 import cron from 'node-cron';
 import { MitreSyncService } from './services/MitreSyncService';
+import { SimulationService } from './services/SimulationService';
+import { InfrastructureDiscoveryService } from './services/InfrastructureDiscoveryService';
+import dashboardRoutes from './routes/dashboard';
+import simulationRoutes from './routes/simulation';
+import decoyRoutes from './routes/decoy';
 
 dotenv.config();
 
@@ -71,11 +76,14 @@ mongoose.connect(MONGODB_URI)
 // Initialize services
 const crdtSync = new CRDTSyncService();
 const simulationService = new RealSimulationService();
+const simulationService = new SimulationService();
+const infrastructureDiscovery = new InfrastructureDiscoveryService();
 const wsHandler = new WebSocketHandler(server, crdtSync, simulationService);
 
 // API Routes
 app.use('/api/dashboard', dashboardRoutes);
 app.use('/api/simulation', simulationRoutes);
+app.use('/api/decoy', decoyRoutes);
 
 // Health check
 app.get('/health', (req, res) => {
@@ -110,20 +118,36 @@ app.get('/api/vms', async (req, res) => {
       crdtState: vm.crdtState,
       dockerContainers: vm.dockerContainers || []
     }));
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    name: 'Maya Deception Fabric Dashboard API',
+    version: '1.0.0',
+    endpoints: {
+      dashboard: '/api/dashboard',
+      decoy: '/api/decoy',
+      health: '/health',
+      websocket: 'ws://localhost:' + PORT + '/ws'
+    }
+  });
+});
+
+app.get('/api/vms', async (req, res) => {
+  try {
+    const discovered = await infrastructureDiscovery.discoverVMs();
 
     res.json({
-      vms: formattedVMs,
+      vms: discovered,
       updatedAt: new Date().toISOString(),
       cached: false
     });
-
   } catch (error) {
-    logger.error('Failed to fetch VM status from DB:', error);
+    logger.error('Failed to discover VM status:', error);
     res.status(500).json({
       vms: [],
       updatedAt: new Date().toISOString(),
       cached: false,
-      error: 'Database error',
+      error: 'Infrastructure discovery error',
       details: error instanceof Error ? error.message : 'Unknown error'
     });
   }
@@ -223,3 +247,18 @@ const gracefulShutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGINT', () => {
+    logger.info('SIGINT received, shutting down gracefully');
+    crdtSync.stopSyncLoop();
+    server.close(() => {
+      mongoose.connection.close()
+        .then(() => {
+          logger.info('Server closed');
+          process.exit(0);
+        })
+        .catch((err) => {
+          logger.error('Error closing MongoDB connection:', err);
+          process.exit(1);
+        });
+    });
+  });
