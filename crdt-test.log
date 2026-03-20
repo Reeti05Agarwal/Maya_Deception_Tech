@@ -1,0 +1,16 @@
+Initial State:
+fake-web-01: Attackers=0, Hash=
+fake-ftp-01: Attackers=0, Hash=
+fake-jump-01: Attackers=0, Hash=
+fake-rdp-01: Attackers=0, Hash=
+fake-smb-01: Attackers=0, Hash=
+fake-ssh-01: Attackers=0, Hash=
+fake-web-02: Attackers=0, Hash=
+fake-web-03: Attackers=0, Hash=
+gateway-vm: Attackers===> default: You assigned a static IP ending in ".1" or ":1" to this machine.
+==> default: This is very often used by the router and can cause the
+==> default: network to not work properly. If the network doesn't work
+==> default: properly, try changing this IP., Hash===> default: You assigned a static IP ending in ".1" or ":1" to this machine.
+==> default: This is very often used by the router and can cause the
+==> default: network to not work properly. If the network doesn't work
+==> default: properly, try changing this IP.

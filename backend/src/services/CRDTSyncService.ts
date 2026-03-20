@@ -1,17 +1,12 @@
 // backend/src/services/CRDTSyncService.ts
 import { EventEmitter } from 'events';
-import { Attacker, AttackEvent, Credential, DecoyHost, LateralMovement, IAttackEvent } from '../models';
+import { Attacker, AttackEvent, Credential, DecoyHost, LateralMovement, IAttackEvent, VMStatus } from '../models';
+import CompanyBlueprintModel from '../models/CompanyBlueprint';
 import { logger } from '../utils/logger';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
 import * as fs from 'fs';
-import { VMStatus } from '../models';
 import { MitreAttackService } from './MitreAttackService';
-
-export class CRDTSyncService extends EventEmitter {
-  private syncInterval?: NodeJS.Timeout;
-  private vmUpdateInterval?: NodeJS.Timeout;
-import CompanyBlueprintModel from '../models/CompanyBlueprint';
 
 export class CRDTSyncService extends EventEmitter {
   private syncInterval?: NodeJS.Timeout;
@@ -32,26 +27,26 @@ export class CRDTSyncService extends EventEmitter {
         this.performSync().catch(err => logger.error('CRDT sync error:', err));
       }
     }, intervalMs);
-  
+
     // Reconciliation loop: refresh VM status every 10 seconds.
     this.vmStatusInterval = setInterval(() => {
       this.updateVMStatusInDB().catch(err => logger.error('VM status update error:', err));
     }, 10000);
-  
+
     // Initial updates
     this.updateVMStatusInDB().catch(err => logger.error('Initial VM status error:', err));
-  
+
     logger.info(`Started CRDT sync loop with ${intervalMs}ms interval`);
   }
-  
+
   stopSyncLoop() {
     if (this.syncInterval) {
       clearInterval(this.syncInterval);
       this.syncInterval = undefined;
     }
-    if (this.vmUpdateInterval) {
-      clearInterval(this.vmUpdateInterval);
-      this.vmUpdateInterval = undefined;
+    if (this.vmStatusInterval) {
+      clearInterval(this.vmStatusInterval);
+      this.vmStatusInterval = undefined;
     }
   }
 
@@ -61,13 +56,6 @@ export class CRDTSyncService extends EventEmitter {
     exists: boolean;
     ip?: string;
   }> {
-  // Converted to a proper class method
-  private async updateVMStatusInDB() {
-    if (await this.isDecoyApplyInProgress()) {
-      logger.info('Skipping VM status refresh while decoy apply is in progress');
-      return;
-    }
-
     const { exec } = require('child_process');
     const util = require('util');
     const execAsync = util.promisify(exec);
@@ -76,9 +64,9 @@ export class CRDTSyncService extends EventEmitter {
     try {
       const { stdout } = await execAsync(`virsh domstate ${vmName} 2>&1`, { timeout: 5000 });
       const state = stdout.trim().toLowerCase();
-      
+
       logger.debug(`virsh domstate ${vmName}: ${state}`);
-      
+
       if (state === 'running') {
         // Get IP if running
         let ip = undefined;
@@ -91,22 +79,22 @@ export class CRDTSyncService extends EventEmitter {
         } catch (e) {
           // IP not critical
         }
-        
+
         return { status: 'running', exists: true, ip };
       }
-      
+
       if (state === 'shut off' || state === 'shutdown') {
         return { status: 'stopped', exists: true };
       }
-      
+
       if (state === 'paused') {
         return { status: 'stopped', exists: true };
       }
-      
+
       if (state.includes('error') || state.includes('failed')) {
         return { status: 'error', exists: true };
       }
-      
+
       // Domain not found or other state
       if (state.includes('not found') || state.includes('no domain')) {
         // Fall through to vagrant check
@@ -124,23 +112,54 @@ export class CRDTSyncService extends EventEmitter {
         `cd ${vmPath} && vagrant status --machine-readable`,
         { timeout: 10000 }
       );
-      
+
       logger.debug(`Vagrant status for ${vmName}: ${stdout.substring(0, 200)}`);
-      
+
       // Check for "not created" state
       if (stdout.includes('state,not_created')) {
         return { status: 'not_created', exists: false };
       }
-      
+
       // Parse machine-readable format: timestamp,provider,state,state-short,state-long
-      const stateLines = stdout.split('\n').filter((l: string) => 
+      const stateLines = stdout.split('\n').filter((l: string) =>
         l.includes(',state,') && !l.includes('state-human')
       );
-    const entries = fs.readdirSync(vagrantDir, { withFileTypes: true });
+
+      if (stateLines.length > 0) {
+        const parts = stateLines[0].split(',');
+        if (parts.length >= 4) {
+          const vagrantState = parts[3].trim();
+          const isRunning = vagrantState === 'running';
+
+          return {
+            status: isRunning ? 'running' : (vagrantState as any),
+            exists: true
+          };
+        }
+      }
+
+      return { status: 'unknown', exists: true };
+    } catch (vagrantError: any) {
+      logger.warn(`Vagrant status failed for ${vmName}:`, vagrantError.message);
+      return { status: 'error', exists: false };
+    }
+  }
+
+  private async updateVMStatusInDB() {
+    const { exec } = require('child_process');
+    const util = require('util');
+    const execAsync = util.promisify(exec);
+
+    if (!fs.existsSync(this.vagrantDir)) {
+      logger.warn('Vagrant directory not found:', this.vagrantDir);
+      return;
+    }
+
+    const entries = fs.readdirSync(this.vagrantDir, { withFileTypes: true });
     const vmDirs = entries
       .filter((entry: any) => entry.isDirectory())
       .map((entry: any) => entry.name)
-      .filter((name: string) => fs.existsSync(path.join(vagrantDir, name, 'Vagrantfile')));
+      .filter((name: string) => fs.existsSync(path.join(this.vagrantDir, name, 'Vagrantfile')));
 
     if (vmDirs.length === 0) {
       await VMStatus.deleteMany({});
@@ -149,233 +168,184 @@ export class CRDTSyncService extends EventEmitter {
     }
 
     for (const vmName of vmDirs) {
-      const vmPath = path.join(vagrantDir, vmName);
-      
-      if (stateLines.length > 0) {
-        const parts = stateLines[0].split(',');
-        if (parts.length >= 4) {
-          const vagrantState = parts[3].trim();
-          const isRunning = vagrantState === 'running';
-          
-          return { 
-            status: isRunning ? 'running' : (vagrantState as any), 
-            exists: true 
-          };
-        }
+      const vmPath = path.join(this.vagrantDir, vmName);
+
+      // Skip if no Vagrantfile
+      if (!fs.existsSync(path.join(vmPath, 'Vagrantfile'))) {
+        logger.debug(`Skipping ${vmName}: no Vagrantfile`);
+        continue;
       }
-      
-      return { status: 'unknown', exists: true };
-    } catch (vagrantError: any) {
-      logger.warn(`Vagrant status failed for ${vmName}:`, vagrantError.message);
-      return { status: 'error', exists: false };
-    }
-  }
 
-private async updateVMStatusInDB() {
-  const { exec } = require('child_process');
-  const util = require('util');
-  const execAsync = util.promisify(exec);
+      try {
+        // Use reliable status detection
+        const { status, exists, ip: virshIp } = await this.getVMStatus(vmName, vmPath);
 
-  const vagrantDir = process.env.VAGRANT_DIR || path.join(__dirname, '../../simulations/fake');
-  
-  if (!fs.existsSync(vagrantDir)) {
-    logger.warn('Vagrant directory not found:', vagrantDir);
-    return;
-  }
+        logger.info(`VM ${vmName} status: ${status} (exists: ${exists})`);
 
-  const entries = fs.readdirSync(vagrantDir, { withFileTypes: true });
-  const vmDirs = entries
-    .filter((entry: any) => entry.isDirectory())
-    .map((entry: any) => entry.name)
-    .filter((name: string) => name.startsWith('fake-') || name === 'gateway-vm');
+        const updateData: any = {
+          vmName,
+          hostname: vmName,
+          status: status === 'not_created' ? 'stopped' : status, // Map not_created to stopped for frontend
+          lastSeen: new Date(),
+        };
 
-  logger.info(`Checking ${vmDirs.length} VMs in ${vagrantDir}`);
-
-  for (const vmName of vmDirs) {
-    const vmPath = path.join(vagrantDir, vmName);
-    
-    // Skip if no Vagrantfile
-    if (!fs.existsSync(path.join(vmPath, 'Vagrantfile'))) {
-      logger.debug(`Skipping ${vmName}: no Vagrantfile`);
-      continue;
-    }
-
-    try {
-      // Use reliable status detection
-      const { status, exists, ip: virshIp } = await this.getVMStatus(vmName, vmPath);
-      
-      logger.info(`VM ${vmName} status: ${status} (exists: ${exists})`);
-
-      const updateData: any = {
-        vmName,
-        hostname: vmName,
-        status: status === 'not_created' ? 'stopped' : status, // Map not_created to stopped for frontend
-        lastSeen: new Date(),
-      };
-
-      // Only collect detailed data if VM is running
-      if (status === 'running') {
-        try {
-          // Use virsh IP if available, otherwise try vagrant ssh
-          // Use virsh IP if available, otherwise try vagrant ssh
-          let vmIp = virshIp;
-          if (!vmIp) {
-            try {
-              const { stdout: ipOutput } = await execAsync(
-                `cd ${vmPath} && vagrant ssh -c "hostname -I 2>/dev/null || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \\$2}' | cut -d/ -f1" 2>/dev/null`,
-                { timeout: 8000, killSignal: 'SIGTERM' }
-              );
-              // Filter out fog warnings and extract valid IPs only
-              vmIp = ipOutput
-                .split('\n')
-                .filter((line: string) => 
-                  line && 
-                  !line.includes('libvirt_ip_command') && 
-                  !line.includes('[fog]') &&
-                  line.match(/^\d+\.\d+\.\d+\.\d+$/)
-                )[0] || undefined;
-            } catch (e) {
-              // Ignore IP fetch errors - VM might still be booting
-              logger.debug(`Could not fetch IP for ${vmName} via SSH`);
-            }
-          }
-          updateData.ip = vmIp;
-
-          // Get CRDT stats - UPDATED with improved parsing
-                    // Get CRDT stats - UPDATED with improved error handling and fog warning filtering
+        // Only collect detailed data if VM is running
+        if (status === 'running') {
           try {
-            // Check if syslogd-helper exists and run it, otherwise return empty JSON
-            // Use timeout and better error handling to prevent crashes
-            let statsOutput = '{}';
-            try {
-              const { stdout } = await execAsync(
-                `cd ${vmPath} && vagrant ssh -c "if command -v syslogd-helper >/dev/null 2>&1; then sudo syslogd-helper stats 2>/dev/null; else echo '{}'; fi" 2>/dev/null`,
-                { timeout: 8000, killSignal: 'SIGTERM' }
-              );
-              statsOutput = stdout || '{}';
-            } catch (sshError: any) {
-              // If SSH fails (VM not ready, timeout, etc.), just use empty stats
-              logger.debug(`SSH to ${vmName} failed or timed out, using empty stats`);
-              statsOutput = '{}';
+            // Use virsh IP if available, otherwise try vagrant ssh
+            let vmIp = virshIp;
+            if (!vmIp) {
+              try {
+                const { stdout: ipOutput } = await execAsync(
+                  `cd ${vmPath} && vagrant ssh -c "hostname -I 2>/dev/null || ip addr show | grep 'inet ' | grep -v '127.0.0.1' | awk '{print \\$2}' | cut -d/ -f1" 2>/dev/null`,
+                  { timeout: 8000, killSignal: 'SIGTERM' }
+                );
+                // Filter out fog warnings and extract valid IPs only
+                vmIp = ipOutput
+                  .split('\n')
+                  .filter((line: string) =>
+                    line &&
+                    !line.includes('libvirt_ip_command') &&
+                    !line.includes('[fog]') &&
+                    line.match(/^\d+\.\d+\.\d+\.\d+$/)
+                  )[0] || undefined;
+              } catch (e) {
+                // Ignore IP fetch errors - VM might still be booting
+                logger.debug(`Could not fetch IP for ${vmName} via SSH`);
+              }
             }
+            updateData.ip = vmIp;
 
-            // Try to parse as JSON first (syslogd-helper should output JSON)
+            // Get CRDT stats - UPDATED with improved error handling and fog warning filtering
             try {
-              if (statsOutput.trim() && statsOutput.trim() !== '{}' && statsOutput.trim() !== 'NO_STATS') {
-                // Filter out any warning lines that might have slipped through (fog/libvirt warnings)
-                const cleanOutput = statsOutput.split('\n').filter((line: string) => 
-                  !line.includes('libvirt_ip_command') && 
-                  !line.includes('[fog][WARNING]') &&
-                  !line.includes('Unrecognized arguments')
-                ).join('\n').trim();
-                
-                // Only parse if we have actual content after filtering
-                if (cleanOutput && cleanOutput !== '{}') {
-                  const stats = JSON.parse(cleanOutput);
-                  const attackers = Object.keys(stats.attackers || {}).length;
-                  const credentials = Object.keys(stats.stolen_creds?.adds || {}).length;
-                  const sessions = Object.keys(stats.active_sessions?.entries || {}).length;
-                  const hash = stats.state_hash || '';
+              // Check if syslogd-helper exists and run it, otherwise return empty JSON
+              // Use timeout and better error handling to prevent crashes
+              let statsOutput = '{}';
+              try {
+                const { stdout } = await execAsync(
+                  `cd ${vmPath} && vagrant ssh -c "if command -v syslogd-helper >/dev/null 2>&1; then sudo syslogd-helper stats 2>/dev/null; else echo '{}'; fi" 2>/dev/null`,
+                  { timeout: 8000, killSignal: 'SIGTERM' }
+                );
+                statsOutput = stdout || '{}';
+              } catch (sshError: any) {
+                // If SSH fails (VM not ready, timeout, etc.), just use empty stats
+                logger.debug(`SSH to ${vmName} failed or timed out, using empty stats`);
+                statsOutput = '{}';
+              }
 
-                  updateData.crdtState = { attackers, credentials, sessions, hash };
-                  if (attackers > 0 || credentials > 0 || sessions > 0) {
-                    logger.info(`VM ${vmName} CRDT: ${attackers} attackers, ${credentials} creds, ${sessions} sessions`);
+              // Try to parse as JSON first (syslogd-helper should output JSON)
+              try {
+                if (statsOutput.trim() && statsOutput.trim() !== '{}' && statsOutput.trim() !== 'NO_STATS') {
+                  // Filter out any warning lines that might have slipped through (fog/libvirt warnings)
+                  const cleanOutput = statsOutput.split('\n').filter((line: string) =>
+                    !line.includes('libvirt_ip_command') &&
+                    !line.includes('[fog][WARNING]') &&
+                    !line.includes('Unrecognized arguments')
+                  ).join('\n').trim();
+
+                  // Only parse if we have actual content after filtering
+                  if (cleanOutput && cleanOutput !== '{}') {
+                    const stats = JSON.parse(cleanOutput);
+                    const attackers = Object.keys(stats.attackers || {}).length;
+                    const credentials = Object.keys(stats.stolen_creds?.adds || {}).length;
+                    const sessions = Object.keys(stats.active_sessions?.entries || {}).length;
+                    const hash = stats.state_hash || '';
+
+                    updateData.crdtState = { attackers, credentials, sessions, hash };
+                    if (attackers > 0 || credentials > 0 || sessions > 0) {
+                      logger.info(`VM ${vmName} CRDT: ${attackers} attackers, ${credentials} creds, ${sessions} sessions`);
+                    }
+                  } else {
+                    updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
                   }
                 } else {
                   updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
                 }
-              } else {
-                updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
-              }
-            } catch (parseError) {
-              // If not JSON, try to parse the old text format
-              if (statsOutput.includes('Attackers:')) {
-                const lines = statsOutput.split('\n');
-                const attackers = parseInt(lines.find((l: string) => l.includes('Attackers:'))?.split(':')[1]?.trim() || '0');
-                const credentials = parseInt(lines.find((l: string) => l.includes('Credentials:'))?.split(':')[1]?.trim() || '0');
-                const sessions = parseInt(lines.find((l: string) => l.includes('Sessions:'))?.split(':')[1]?.trim() || '0');
-                const hash = lines.find((l: string) => l.includes('State hash:'))?.split(':')[1]?.trim() || '';
+              } catch (parseError) {
+                // If not JSON, try to parse the old text format
+                if (statsOutput.includes('Attackers:')) {
+                  const lines = statsOutput.split('\n');
+                  const attackers = parseInt(lines.find((l: string) => l.includes('Attackers:'))?.split(':')[1]?.trim() || '0');
+                  const credentials = parseInt(lines.find((l: string) => l.includes('Credentials:'))?.split(':')[1]?.trim() || '0');
+                  const sessions = parseInt(lines.find((l: string) => l.includes('Sessions:'))?.split(':')[1]?.trim() || '0');
+                  const hash = lines.find((l: string) => l.includes('State hash:'))?.split(':')[1]?.trim() || '';
 
-                updateData.crdtState = { attackers, credentials, sessions, hash };
-                logger.info(`VM ${vmName} CRDT (legacy): ${attackers} attackers, ${credentials} creds`);
-              } else {
-                updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+                  updateData.crdtState = { attackers, credentials, sessions, hash };
+                  logger.info(`VM ${vmName} CRDT (legacy): ${attackers} attackers, ${credentials} creds`);
+                } else {
+                  updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+                }
               }
+            } catch (statsError) {
+              logger.warn(`Failed to get CRDT stats for ${vmName}:`, statsError);
+              updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
             }
-          } catch (statsError) {
-            logger.warn(`Failed to get CRDT stats for ${vmName}:`, statsError);
-            updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
-          }
 
-          // Get Docker containers
-          try {
-            const { stdout: dockerOutput } = await execAsync(
-              `cd ${vmPath} && vagrant ssh -c "sudo docker ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' 2>/dev/null || echo ''" 2>/dev/null`,
-              { timeout: 8000 }
-            );
+            // Get Docker containers
+            try {
+              const { stdout: dockerOutput } = await execAsync(
+                `cd ${vmPath} && vagrant ssh -c "sudo docker ps -a --format '{{.ID}}|{{.Names}}|{{.Image}}|{{.Status}}|{{.Ports}}' 2>/dev/null || echo ''" 2>/dev/null`,
+                { timeout: 8000 }
+              );
 
-            if (dockerOutput.trim()) {
-              updateData.dockerContainers = dockerOutput.split('\n')
-                .filter((line: string) => line.includes('|'))
-                .map((line: string) => {
-                  const parts = line.split('|');
-                  return {
-                    id: parts[0]?.substring(0, 12) || '',
-                    name: parts[1] || '',
-                    image: parts[2] || '',
-                    status: parts[3]?.includes('Up') ? 'running' : 'exited',
-                    ports: parts[4] ? parts[4].split(', ') : [],
-                    created: ''
-                  };
-                });
-            } else {
+              if (dockerOutput.trim()) {
+                updateData.dockerContainers = dockerOutput.split('\n')
+                  .filter((line: string) => line.includes('|'))
+                  .map((line: string) => {
+                    const parts = line.split('|');
+                    return {
+                      id: parts[0]?.substring(0, 12) || '',
+                      name: parts[1] || '',
+                      image: parts[2] || '',
+                      status: parts[3]?.includes('Up') ? 'running' : 'exited',
+                      ports: parts[4] ? parts[4].split(', ') : [],
+                      created: ''
+                    };
+                  });
+              } else {
+                updateData.dockerContainers = [];
+              }
+            } catch (dockerError) {
               updateData.dockerContainers = [];
             }
-          } catch (dockerError) {
-            updateData.dockerContainers = [];
+          } catch (detailError) {
+            logger.warn(`Failed to get details for ${vmName}:`, detailError);
           }
-        } catch (detailError) {
-          logger.warn(`Failed to get details for ${vmName}:`, detailError);
+        } else {
+          // VM not running - clear dynamic data
+          updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
+          updateData.dockerContainers = [];
+          if (!updateData.ip) updateData.ip = undefined;
         }
-      } else {
-        // VM not running - clear dynamic data
-        updateData.crdtState = { attackers: 0, credentials: 0, sessions: 0, hash: '' };
-        updateData.dockerContainers = [];
-        if (!updateData.ip) updateData.ip = undefined;
+
+        // Upsert to MongoDB
+        await VMStatus.findOneAndUpdate(
+          { vmName },
+          updateData,
+          { upsert: true, new: true }
+        );
+
+        logger.info(`Updated VM status for ${vmName}: ${updateData.status}`);
+
+      } catch (error: any) {
+        logger.error(`Failed to update VM status for ${vmName}:`, error.message);
+
+        // Mark as error in DB
+        await VMStatus.findOneAndUpdate(
+          { vmName },
+          {
+            vmName,
+            hostname: vmName,
+            status: 'error',
+            lastSeen: new Date(),
+            crdtState: { attackers: 0, credentials: 0, sessions: 0, hash: '' },
+            dockerContainers: []
+          },
+          { upsert: true }
+        );
       }
-
-      // Upsert to MongoDB
-      await VMStatus.findOneAndUpdate(
-        { vmName },
-        updateData,
-        { upsert: true, new: true }
-      );
-
-      logger.info(`Updated VM status for ${vmName}: ${updateData.status}`);
-
-    } catch (error: any) {
-      logger.error(`Failed to update VM status for ${vmName}:`, error.message);
-      
-      // Mark as error in DB
-      await VMStatus.findOneAndUpdate(
-        { vmName },
-        { 
-          vmName,
-          hostname: vmName,
-          status: 'error',
-          lastSeen: new Date(),
-          crdtState: { attackers: 0, credentials: 0, sessions: 0, hash: '' },
-          dockerContainers: []
-        },
-        { upsert: true }
-      );
-    }
-    if (this.vmStatusInterval) {
-      clearInterval(this.vmStatusInterval);
-      this.vmStatusInterval = undefined;
     }
   }
-}
 
   async performSync() {
     if (await this.isDecoyApplyInProgress()) {
@@ -385,7 +355,7 @@ private async updateVMStatusInDB() {
 
     this.isSyncing = true;
     let attackersFound = 0;
-    
+
     try {
       const { exec } = require('child_process');
       const util = require('util');
@@ -419,7 +389,7 @@ private async updateVMStatusInDB() {
               { timeout: 3000 }
             );
             isRunning = stdout.trim().toLowerCase() === 'running';
-            
+
             if (isRunning) {
               logger.debug(`CRDT sync: ${vm} (${domainName}) is running`);
             }
@@ -479,7 +449,7 @@ private async updateVMStatusInDB() {
   private async processState(state: any, sourceHost: string) {
     const nodeId = state.node_id || sourceHost;
     logger.info(`Processing CRDT state from ${sourceHost}, node_id: ${nodeId}`);
-    
+
     const attackerCount = Object.keys(state.attackers || {}).length;
     const credCount = state.stolen_creds?.adds ? Object.keys(state.stolen_creds.adds).length : 0;
     logger.info(`State contents: attackers=${attackerCount}, creds=${credCount}`);
@@ -513,7 +483,7 @@ private async updateVMStatusInDB() {
   /**
    * Extract attacker IP from CRDT state
    * Since tags contain (node_id, timestamp), we need to track attacker IP separately
-   * This implementation uses the attackerIp parameter passed from processState
+   * This implementation uses the attacker IP parameter passed from processState
    */
   private extractAttackerIpFromTags(tags: [string, number][], attackerIp?: string): string | undefined {
     // If attackerIp is provided directly, use it
@@ -663,45 +633,19 @@ private async updateVMStatusInDB() {
       await event.save();
       this.emit('newEvent', event);
       logger.info(`Created visit event: ${attackerId} -> ${decoy}`);
+
+      await DecoyHost.findOneAndUpdate(
+        { hostname: decoy },
+        {
+          $inc: { interactions: 1 },
+          $set: { lastInteraction: new Date() },
+          $addToSet: { attackerIds: attackerId }
+        },
+        { upsert: true }
+      );
     } catch (error) {
       logger.error(`Failed to create visit event for ${attackerId} -> ${decoy}:`, error);
     }
-    const eventId = `evt-${uuidv4()}`;
-    
-    const existing = await AttackEvent.findOne({ 
-      attackerId, 
-      description: `Attacker visited ${decoy}`,
-      timestamp: { $gte: new Date(Date.now() - 60000) }
-    });
-    
-    if (existing) return;
-
-    const event = new AttackEvent({
-      eventId,
-      attackerId,
-      stage: 'RECON',
-      type: 'Discovery',
-      technique: 'T1083',
-      tactic: 'Discovery',
-      description: `Attacker visited ${decoy}`,
-      sourceHost: attackerId.split('-').slice(1).join('.'),
-      targetHost: decoy,
-      severity: 'Low',
-      status: 'Detected'
-    });
-
-    await event.save();
-    this.emit('newEvent', event);
-
-    await DecoyHost.findOneAndUpdate(
-      { hostname: decoy },
-      { 
-        $inc: { interactions: 1 },
-        $set: { lastInteraction: new Date() },
-        $addToSet: { attackerIds: attackerId }
-      },
-      { upsert: true }
-    );
   }
 
   /**
@@ -718,31 +662,9 @@ private async updateVMStatusInDB() {
       // Check if we already have this action event to avoid duplicates
       // Same attacker, same action, same target within last 24 hours
       const existingEvent = await AttackEvent.findOne({
-    const event = new AttackEvent({
-      eventId,
-      timestamp: new Date(ts * 1000),
-      attackerId,
-      stage: this.getStageFromType(type, action),
-      type,
-      technique,
-      tactic: this.getTacticFromType(type),
-      description: action,
-      sourceHost: node,
-      targetHost: decoy,
-      command: action,
-      severity,
-      status: 'Detected'
-    });
-
-    await event.save();
-    this.emit('newEvent', event);
-
-    if (type === 'Lateral Movement') {
-      await LateralMovement.create({
-        movementId: `mov-${uuidv4()}`,
         attackerId,
         targetHost: decoy,
-        commandPatternMatched: action,
+        description: action,
         timestamp: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } // Last 24 hours
       }).sort({ timestamp: -1 });
 
@@ -834,6 +756,16 @@ private async updateVMStatusInDB() {
       await event.save();
       this.emit('newEvent', event);
       logger.info(`Created action event: ${attackerId} -> ${decoy}: ${action}`);
+
+      if (eventType === 'Lateral Movement') {
+        await LateralMovement.create({
+          movementId: `mov-${uuidv4()}`,
+          attackerId,
+          targetHost: decoy,
+          commandPatternMatched: action,
+          timestamp: new Date(ts) || new Date()
+        });
+      }
     } catch (error) {
       logger.error(`Failed to create action event for ${attackerId} -> ${decoy}:`, error);
     }
@@ -917,33 +849,34 @@ private async updateVMStatusInDB() {
 
       await credential.save();
       logger.info(`Created credential: ${username} for attacker ${attackerId}`);
+
+      // Create attack event for credential theft
+      const event = new AttackEvent({
+        eventId: `evt-${uuidv4()}`,
+        timestamp: new Date(),
+        attackerId,
+        type: 'Credential Theft',
+        tactic: 'credential-access',
+        tacticId: 'TA0006',
+        tacticName: 'Credential Access',
+        technique: 'T1003',
+        techniqueName: 'OS Credential Dumping',
+        isSubtechnique: false,
+        mitreConfidence: 0.9,
+        classificationMethod: 'pattern',
+        allMatchingTechniques: ['T1003'],
+        description: `Credential stolen: ${username}`,
+        sourceHost: attackerIp || 'unknown',
+        targetHost: sourceHost,
+        severity: 'Critical',
+        status: 'Detected'
+      });
+
+      await event.save();
+      this.emit('newEvent', event);
     } catch (error) {
       logger.error(`Failed to create credential from ${sourceHost}:`, error);
     }
-    await Credential.create({
-      credentialId,
-      username,
-      password,
-      source: sourceHost,
-      attackerId,
-      decoyHost: sourceHost,
-      status: 'Stolen',
-      riskScore: this.calculateCredentialRisk(username, password)
-    });
-
-    await AttackEvent.create({
-      eventId: `evt-${uuidv4()}`,
-      attackerId,
-      stage: 'CREDENTIAL_ACCESS',
-      type: 'Credential Theft',
-      technique: 'T1003',
-      tactic: 'Credential Access',
-      description: `Credential stolen: ${username}`,
-      sourceHost: attackerIp || 'unknown',
-      targetHost: sourceHost,
-      severity: 'Critical',
-      status: 'Detected'
-    });
   }
 
   /**
@@ -968,20 +901,6 @@ private async updateVMStatusInDB() {
         attackerId: attacker.attackerId,
         timestamp: new Date(ts) || new Date(),
         sourceHost: attacker.entryPoint,
-    const eventId = `evt-${uuidv4()}`;
-    
-    await AttackEvent.findOneAndUpdate(
-      { eventId },
-      {
-        eventId,
-        timestamp: new Date(ts * 1000),
-        attackerId: `APT-${node.replace(/\./g, '-')}`,
-        stage: 'INITIAL_ACCESS',
-        type: 'Initial Access',
-        technique: 'T1078',
-        tactic: 'Initial Access',
-        description: `Active session established on ${host}`,
-        sourceHost: node,
         targetHost: host,
         technique: 'T1021',
         method: 'SSH',
@@ -990,6 +909,31 @@ private async updateVMStatusInDB() {
       });
 
       await movement.save();
+
+      // Also create an attack event
+      const event = new AttackEvent({
+        eventId: `evt-${uuidv4()}`,
+        timestamp: new Date(ts * 1000),
+        attackerId: attacker.attackerId,
+        type: 'Initial Access',
+        tactic: 'initial-access',
+        tacticId: 'TA0001',
+        tacticName: 'Initial Access',
+        technique: 'T1078',
+        techniqueName: 'Valid Accounts',
+        isSubtechnique: false,
+        mitreConfidence: 0.8,
+        classificationMethod: 'pattern',
+        allMatchingTechniques: ['T1078'],
+        description: `Active session established on ${host}`,
+        sourceHost: node,
+        targetHost: host,
+        severity: 'High',
+        status: 'Detected'
+      });
+
+      await event.save();
+      this.emit('newEvent', event);
       logger.info(`Created session event: ${attacker.attackerId} -> ${host} (session: ${sessionId})`);
     } catch (error) {
       logger.error(`Failed to create session event for ${host}:`, error);
@@ -1046,7 +990,7 @@ private async updateVMStatusInDB() {
 
     return 'User';
   }
-}
+
   private getStageFromType(type: string, action = ''): string {
     const lowerType = type.toLowerCase();
     const lowerAction = action.toLowerCase();
@@ -1069,8 +1013,4 @@ private async updateVMStatusInDB() {
     if (password.toLowerCase().includes('password')) score += 10;
     return Math.min(score, 100);
   }
-}
-
-function attackerIpFromTags(tags: [string, number][]): string | undefined {
-  return undefined;
 }

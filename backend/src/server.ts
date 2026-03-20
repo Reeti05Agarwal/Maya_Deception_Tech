@@ -13,16 +13,13 @@ import { logger } from './utils/logger';
 import { CRDTSyncService } from './services/CRDTSyncService';
 import { WebSocketHandler } from './websocket/WebSocketHandler';
 import { RealSimulationService } from './services/RealSimulationService';
-import dashboardRoutes from './routes/dashboard';
-import simulationRoutes from './routes/simulation';
-import VMStatus from './models/VMStatus'; 
-import cron from 'node-cron';
-import { MitreSyncService } from './services/MitreSyncService';
-import { SimulationService } from './services/SimulationService';
 import { InfrastructureDiscoveryService } from './services/InfrastructureDiscoveryService';
+import { MitreSyncService } from './services/MitreSyncService';
 import dashboardRoutes from './routes/dashboard';
 import simulationRoutes from './routes/simulation';
 import decoyRoutes from './routes/decoy';
+import VMStatus from './models/VMStatus';
+import cron from 'node-cron';
 
 dotenv.config();
 
@@ -32,6 +29,7 @@ const server = createServer(app);
 const PORT = process.env.PORT || 3001;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost:27017/maya_deception';
 
+// Daily MITRE sync at 3 AM
 cron.schedule('0 3 * * *', async () => {
   console.log('[Scheduler] Starting daily MITRE sync...');
   const syncService = new MitreSyncService();
@@ -76,7 +74,6 @@ mongoose.connect(MONGODB_URI)
 // Initialize services
 const crdtSync = new CRDTSyncService();
 const simulationService = new RealSimulationService();
-const simulationService = new SimulationService();
 const infrastructureDiscovery = new InfrastructureDiscoveryService();
 const wsHandler = new WebSocketHandler(server, crdtSync, simulationService);
 
@@ -96,18 +93,14 @@ app.get('/health', (req, res) => {
   });
 });
 
-// VM Status endpoint with proper error handling
+// VM Status endpoint - database lookup
 app.get('/api/vms', async (req, res) => {
   try {
     logger.info('Fetching VM status from database...');
-    
-    const vms = await VMStatus.find().sort({ vmName: 1 }).lean();
-    
-    logger.info(`Found ${vms.length} VMs in database`);
 
-    if (!vms || vms.length === 0) {
-      logger.warn('No VMs found in database');
-    }
+    const vms = await VMStatus.find().sort({ vmName: 1 }).lean();
+
+    logger.info(`Found ${vms.length} VMs in database`);
 
     // Transform to expected format
     const formattedVMs = vms.map(vm => ({
@@ -118,21 +111,26 @@ app.get('/api/vms', async (req, res) => {
       crdtState: vm.crdtState,
       dockerContainers: vm.dockerContainers || []
     }));
-// Root endpoint
-app.get('/', (req, res) => {
-  res.json({
-    name: 'Maya Deception Fabric Dashboard API',
-    version: '1.0.0',
-    endpoints: {
-      dashboard: '/api/dashboard',
-      decoy: '/api/decoy',
-      health: '/health',
-      websocket: 'ws://localhost:' + PORT + '/ws'
-    }
-  });
+
+    res.json({
+      vms: formattedVMs,
+      updatedAt: new Date().toISOString(),
+      cached: false
+    });
+  } catch (error) {
+    logger.error('Failed to fetch VM status:', error);
+    res.status(500).json({
+      vms: [],
+      updatedAt: new Date().toISOString(),
+      cached: false,
+      error: 'VM status fetch error',
+      details: error instanceof Error ? error.message : 'Unknown error'
+    });
+  }
 });
 
-app.get('/api/vms', async (req, res) => {
+// VM Discovery endpoint - infrastructure discovery
+app.get('/api/vms/discover', async (req, res) => {
   try {
     const discovered = await infrastructureDiscovery.discoverVMs();
 
@@ -156,9 +154,9 @@ app.get('/api/vms', async (req, res) => {
 // Attacker summary endpoint (for dashboard)
 app.get('/api/attackers/summary', async (req, res) => {
   try {
-    const { Attacker } = require('../src/models');
+    const { Attacker } = require('./models');
     const attackers = await Attacker.find().sort({ lastSeen: -1 }).limit(100).lean();
-    
+
     const summary = {
       total: attackers.length,
       critical: attackers.filter((a: any) => a.riskLevel === 'Critical').length,
@@ -175,7 +173,7 @@ app.get('/api/attackers/summary', async (req, res) => {
         status: a.status
       }))
     };
-    
+
     res.json(summary);
   } catch (error) {
     logger.error('Failed to fetch attacker summary:', error);
@@ -191,9 +189,10 @@ app.get('/', (req, res) => {
     endpoints: {
       dashboard: '/api/dashboard',
       vms: '/api/vms',
+      vmsDiscover: '/api/vms/discover',
       attackers: '/api/attackers/summary',
       health: '/health',
-      websocket: 'ws://localhost:' + PORT + '/ws'
+      websocket: `ws://localhost:${PORT}/ws`
     }
   });
 });
@@ -205,7 +204,7 @@ app.use(errorHandler);
 server.listen(PORT, () => {
   logger.info(`🚀 Maya Dashboard API running on http://localhost:${PORT}`);
   logger.info(`📊 WebSocket endpoint: ws://localhost:${PORT}/ws`);
-  
+
   // Start CRDT sync loop
   const syncInterval = parseInt(process.env.CRDT_SYNC_INTERVAL || '10000');
   crdtSync.startSyncLoop(syncInterval);
@@ -214,19 +213,19 @@ server.listen(PORT, () => {
 // Graceful shutdown with timeout
 const gracefulShutdown = async (signal: string) => {
   logger.info(`${signal} received, shutting down gracefully`);
-  
+
   // Stop accepting new requests
   server.close(async () => {
     logger.info('HTTP server closed');
-    
+
     // Stop sync loops
     crdtSync.stopSyncLoop();
-    
+
     // Close MongoDB connection with timeout
     try {
       await Promise.race([
         mongoose.connection.close(),
-        new Promise((_, reject) => 
+        new Promise((_, reject) =>
           setTimeout(() => reject(new Error('MongoDB close timeout')), 5000)
         )
       ]);
@@ -237,7 +236,7 @@ const gracefulShutdown = async (signal: string) => {
       process.exit(1);
     }
   });
-  
+
   // Force exit after 10 seconds
   setTimeout(() => {
     logger.error('Could not close connections in time, forcefully exiting');
@@ -247,18 +246,3 @@ const gracefulShutdown = async (signal: string) => {
 
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-  process.on('SIGINT', () => {
-    logger.info('SIGINT received, shutting down gracefully');
-    crdtSync.stopSyncLoop();
-    server.close(() => {
-      mongoose.connection.close()
-        .then(() => {
-          logger.info('Server closed');
-          process.exit(0);
-        })
-        .catch((err) => {
-          logger.error('Error closing MongoDB connection:', err);
-          process.exit(1);
-        });
-    });
-  });

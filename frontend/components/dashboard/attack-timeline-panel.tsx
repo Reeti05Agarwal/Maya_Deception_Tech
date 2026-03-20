@@ -88,8 +88,8 @@ export function AttackTimelinePanel() {
           <p className="text-sm text-muted-foreground">No attacker activity recorded yet.</p>
         ) : (
           <div className="space-y-2 max-h-[280px] overflow-y-auto">
-            {sortedItems.map((event) => (
-              <div key={event.eventId || `${event.timestamp}-${event.description}`} className="rounded border border-border p-2.5 text-sm">
+            {sortedItems.map((event, index) => (
+              <div key={event.eventId || `event-${event.timestamp}-${index}`} className="rounded border border-border p-2.5 text-sm">
                 <div className="flex items-center justify-between gap-2">
                   <p className="font-mono text-xs text-muted-foreground">[{event.time}]</p>
                   <Badge variant="outline" className={severityClass(event.severity)}>

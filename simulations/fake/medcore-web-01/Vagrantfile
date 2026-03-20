@@ -1,0 +1,165 @@
+# -*- mode: ruby -*-
+# vi: set ft=ruby :
+
+Vagrant.configure("2") do |config|
+  config.vm.box = "generic/debian12"
+  config.vm.box_version = "4.3.12"
+  config.vm.hostname = "medcore-web-01"
+
+  config.vm.network "private_network",
+    libvirt__network_name: "maya_internal",
+    ip: "10.20.20.150"
+
+  config.vm.provider :libvirt do |lv|
+    lv.memory = 1024
+    lv.cpus = 1
+  end
+
+  config.vm.provision "shell", inline: <<-SHELL
+    set -e
+
+    echo "[+] Updating system..."
+    apt update
+
+    echo "[+] Installing packages..."
+    apt install -y nginx openssh-server sudo docker.io
+
+    echo "[+] Creating admin user..."
+    useradd -m -s /bin/bash admin 2>/dev/null || true
+    echo "admin:admin123!" | chpasswd
+    usermod -aG sudo admin
+    usermod -aG docker admin
+
+    echo "[+] Enabling services..."
+    systemctl enable nginx
+    systemctl enable ssh
+    systemctl enable docker
+    systemctl start nginx
+    systemctl start ssh
+    systemctl start docker
+
+    echo "[+] Creating fake web content..."
+
+    # Create index.html
+    cat > /var/www/html/index.html <<'INNER_HTML'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Internal Web Portal</title>
+</head>
+<body>
+    <h1>Corp Internal Web Portal</h1>
+    <p>Welcome to the internal company web server.</p>
+    <hr>
+    <h2>Internal Links:</h2>
+    <ul>
+        <li><a href="/docs/">Documentation</a></li>
+        <li><a href="/admin/">Admin Panel</a></li>
+        <li><a href="/git/">Git Repository</a></li>
+    </ul>
+    <hr>
+    <!-- TODO: Remove credentials before production -->
+    <!-- admin:admin123! -->
+    <!-- db: Sup3rS3cr3t! -->
+</body>
+</html>
+INNER_HTML
+
+    # Create fake admin directory and page
+    mkdir -p /var/www/html/admin
+    cat > /var/www/html/admin/index.html <<'INNER_ADMIN'
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Admin Panel</title>
+</head>
+<body>
+    <h1>Admin Panel</h1>
+    <p>Welcome, admin!</p>
+    <hr>
+    <h2>System Status:</h2>
+    <ul>
+        <li>Web Server: Online</li>
+        <li>Database: Connected</li>
+        <li>Cache: Running</li>
+    </ul>
+    <h2>Quick Actions:</h2>
+    <ul>
+        <li><a href="/admin/users">User Management</a></li>
+        <li><a href="/admin/logs">System Logs</a></li>
+        <li><a href="/admin/backup">Backup</a></li>
+    </ul>
+    <!-- Database credentials: webapp:MyDBpass123! -->
+</body>
+</html>
+INNER_ADMIN
+
+    echo "[+] Configuring Docker macvlan..."
+
+    # Wait for Docker to be fully ready
+    echo "Waiting for Docker daemon..."
+    until docker info >/dev/null 2>&1; do
+        sleep 2
+    done
+
+    # Enable promiscuous mode
+    ip link set eth1 promisc on || echo "Warning: Could not set promisc mode"
+
+    # Get network details
+    IP_ADDR=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}' | head -1)
+    NETWORK=$(ip -4 addr show eth1 | grep -oP '(?<=inet\\s)\\d+(\\.\\d+){3}/\\d+' | head -1)
+
+    if [ -z "$IP_ADDR" ]; then
+        echo "Warning: Could not detect IP, using default"
+        IP_ADDR="10.20.20.11"
+        NETWORK="10.20.20.0/24"
+    fi
+
+    # Remove old networks
+    docker network rm honeypot-macvlan 2>/dev/null || true
+    docker network rm honeypot-internal 2>/dev/null || true
+
+    # Create macvlan network
+    docker network create -d macvlan \
+      --subnet="${NETWORK}" \
+      --gateway="${IP_ADDR}" \
+      -o parent=eth1 \
+      honeypot-macvlan || echo "Warning: Failed to create macvlan network"
+
+    # Create internal bridge
+    docker network create \
+      --driver bridge \
+      honeypot-internal || echo "Warning: Failed to create internal network"
+
+    echo "[+] Installing syslogd-helper..."
+    cat > /usr/local/bin/syslogd-helper <<'INNER_SYSLOG'
+#!/bin/bash
+case "$1" in
+  stats)
+    if [ -f /var/lib/.syscache ]; then
+      cat /var/lib/.syscache
+    else
+      echo '{"attackers":{},"stolen_creds":{},"active_sessions":{}}'
+    fi
+    ;;
+  *)
+    echo "Usage: $0 {stats}"
+    exit 1
+    ;;
+esac
+INNER_SYSLOG
+    chmod +x /usr/local/bin/syslogd-helper
+
+    echo "[+] Running test containers..."
+    # Run a simple nginx container to demonstrate macvlan
+    docker run -d --name web-decoy \
+      --network honeypot-macvlan \
+      --ip="10.20.20.12" \
+      nginx:alpine || echo "Could not start test container"
+
+    echo "[+] Provisioning complete."
+    echo "[+] Web server running at http://10.20.20.11"
+    echo "[+] Admin panel at http://10.20.20.11/admin/"
+    echo "[+] Credentials: admin/admin123!"
+  SHELL
+end
